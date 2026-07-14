@@ -1,6 +1,10 @@
+const supabaseUrl = 'https://YOUR_SUPABASE_URL';
+const supabaseAnonKey = 'YOUR_ANON_KEY';
+
+let supabaseClient;
 let currentView = 'dashboard';
 let state = {
-  household: { name: 'Viki & Káťa', budget_start_day: 1 },
+  household: { id: null, name: 'Viki & Káťa', budget_start_day: 1 },
   periods: [],
   categories: [],
   transactions: [],
@@ -75,31 +79,57 @@ function calculatePeriodSummary(period) {
   return { incomes, expenses, balance, categoryBudgetTotal, rolloverTotal, availableTotal, spentTotal, remainingTotal };
 }
 
-function generateId() {
-  return Math.random().toString(36).substr(2, 9);
+function initSupabase() {
+  if (supabaseClient) return supabaseClient;
+  if (typeof window.supabase?.createClient !== 'function') {
+    state.status = { type: 'error', message: 'Chyba: Supabase klient se nepodařilo načíst. Zkontrolujte připojení.' };
+    render();
+    return null;
+  }
+  supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+  return supabaseClient;
 }
 
-function saveState() {
-  localStorage.setItem('budgetState', JSON.stringify(state));
-}
-function loadState() {
-  const saved = localStorage.getItem('budgetState');
-  if (saved) {
-    try {
-      Object.assign(state, JSON.parse(saved));
-    } catch (e) {
-      console.error('Chyba při načítání dat:', e);
+async function loadAllData() {
+  state.loading = true;
+  render();
+  try {
+    const [{ data: households }, { data: periods }, { data: categories }, { data: transactions }] = await Promise.all([
+      supabaseClient.from('households').select('*').limit(1),
+      supabaseClient.from('budget_periods').select('*').order('start_date', { ascending: false }),
+      supabaseClient.from('categories').select('*').order('name'),
+      supabaseClient.from('transactions').select('*').order('transaction_date', { ascending: false }),
+    ]);
+    
+    if (households?.length) {
+      state.household = households[0];
     }
+    state.periods = periods || [];
+    state.categories = categories || [];
+    state.transactions = transactions || [];
+    
+    if (!state.currentPeriodId && state.periods.length) {
+      state.currentPeriodId = state.periods[0].id;
+    }
+    state.status = null;
+  } catch (error) {
+    state.status = { type: 'error', message: 'Chyba při načítání dat: ' + error.message };
   }
-  if (!state.currentPeriodId && state.periods.length) {
-    state.currentPeriodId = state.periods[0].id;
-  }
+  state.loading = false;
   render();
 }
 
-function insertTransaction(formData) {
+async function insertTransaction(formData) {
+  if (!navigator.onLine) {
+    state.status = { type: 'error', message: 'Zařízení je offline. Nelze uložit.' };
+    render();
+    return false;
+  }
+  state.loading = true;
+  render();
+  
   const payload = {
-    id: generateId(),
+    household_id: state.household.id,
     period_id: getPeriodForDate(formData.transaction_date),
     type: formData.type,
     amount: Number(formData.amount),
@@ -107,59 +137,126 @@ function insertTransaction(formData) {
     paid_by: formData.paid_by,
     transaction_date: formData.transaction_date,
     note: formData.note,
-    created_at: getToday(),
   };
-  state.transactions.push(payload);
-  state.status = { type: 'success', message: 'Transakce uložena.' };
-  saveState();
-  render();
-  return true;
+  
+  try {
+    const { error } = await supabaseClient.from('transactions').insert([payload]);
+    if (error) throw error;
+    state.status = { type: 'success', message: 'Transakce uložena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: error.message };
+    state.loading = false;
+    render();
+  }
 }
-function updateTransaction(id, payload) {
-  const idx = state.transactions.findIndex((t) => t.id === id);
-  if (idx === -1) return false;
-  payload.period_id = getPeriodForDate(payload.transaction_date);
-  payload.amount = Number(payload.amount);
-  if (payload.type === 'income') payload.category_id = null;
-  state.transactions[idx] = { ...state.transactions[idx], ...payload };
-  state.status = { type: 'success', message: 'Transakce upravena.' };
-  saveState();
+
+async function updateTransaction(id, payload) {
+  state.loading = true;
   render();
-  return true;
+  
+  const nextPayload = {
+    ...payload,
+    period_id: getPeriodForDate(payload.transaction_date),
+    amount: Number(payload.amount),
+    category_id: payload.type === 'expense' ? payload.category_id : null,
+  };
+  
+  try {
+    const { error } = await supabaseClient.from('transactions').update(nextPayload).eq('id', id);
+    if (error) throw error;
+    state.status = { type: 'success', message: 'Transakce upravena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: error.message };
+    state.loading = false;
+    render();
+  }
 }
-function deleteTransaction(id) {
+
+async function deleteTransaction(id) {
   if (!confirm('Opravdu chcete smazat transakci?')) return false;
-  state.transactions = state.transactions.filter((t) => t.id !== id);
-  state.status = { type: 'success', message: 'Transakce smazána.' };
-  saveState();
+  state.loading = true;
   render();
-  return true;
+  
+  try {
+    const { error } = await supabaseClient.from('transactions').delete().eq('id', id);
+    if (error) throw error;
+    state.status = { type: 'success', message: 'Transakce smazána.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: error.message };
+    state.loading = false;
+    render();
+  }
 }
-function createPeriod(payload) {
-  payload.id = generateId();
-  state.periods.push(payload);
-  state.currentPeriodId = payload.id;
-  state.status = { type: 'success', message: 'Období vytvořeno.' };
-  saveState();
+
+async function createPeriod(payload) {
+  state.loading = true;
   render();
-  return true;
+  
+  const nextPayload = { ...payload, household_id: state.household.id };
+  
+  try {
+    const { error } = await supabaseClient.from('budget_periods').insert([nextPayload]);
+    if (error) throw error;
+    state.status = { type: 'success', message: 'Období vytvořeno.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: error.message };
+    state.loading = false;
+    render();
+  }
 }
-function createCategory(payload) {
-  payload.id = generateId();
-  state.categories.push(payload);
-  state.status = { type: 'success', message: 'Kategorie vytvořena.' };
-  saveState();
+
+async function createCategory(payload) {
+  state.loading = true;
   render();
-  return true;
+  
+  const nextPayload = { ...payload, household_id: state.household.id };
+  
+  try {
+    const { error } = await supabaseClient.from('categories').insert([nextPayload]);
+    if (error) throw error;
+    state.status = { type: 'success', message: 'Kategorie vytvořena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: error.message };
+    state.loading = false;
+    render();
+  }
 }
-function updateCategory(id, payload) {
-  const idx = state.categories.findIndex((c) => c.id === id);
-  if (idx === -1) return false;
-  state.categories[idx] = { ...state.categories[idx], ...payload };
-  state.status = { type: 'success', message: 'Kategorie upravena.' };
-  saveState();
+
+async function updateCategory(id, payload) {
+  state.loading = true;
   render();
-  return true;
+  
+  try {
+    const { error } = await supabaseClient.from('categories').update(payload).eq('id', id);
+    if (error) throw error;
+    state.status = { type: 'success', message: 'Kategorie upravena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: error.message };
+    state.loading = false;
+    render();
+  }
+}
+
+async function updatePeriod(id, payload) {
+  state.loading = true;
+  render();
+  
+  try {
+    const { error } = await supabaseClient.from('budget_periods').update(payload).eq('id', id);
+    if (error) throw error;
+    state.status = { type: 'success', message: 'Období upraveno.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: error.message };
+    state.loading = false;
+    render();
+  }
 }
 
 function setView(view) {
@@ -259,7 +356,7 @@ function renderHistory() {
       </div>
       <div class="grid grid-3" style="margin-top:12px;">
         <label>Hledat poznámku<input id="history-search" value="${state.filters.search}"></label>
-        <label>Období<select id="history-period">${['all', ...state.periods.map((p) => p.id)].map((value) => `<option value="${value}" ${state.filters.periodId === value ? 'selected' : ''}>${value === 'all' ? 'Všechna' : getPeriodById(value).name}</option>`).join('')}</select></label>
+        <label>Období<select id="history-period">${['all', ...state.periods.map((p) => p.id)].map((value) => `<option value="${value}" ${state.filters.periodId === value ? 'selected' : ''}>${value === 'all' ? 'Všechna' : getPeriodById(value)?.name}</option>`).join('')}</select></label>
         <label>Typ<select id="history-type"><option value="all" ${state.filters.type==='all'?'selected':''}>Vše</option><option value="income" ${state.filters.type==='income'?'selected':''}>Příjem</option><option value="expense" ${state.filters.type==='expense'?'selected':''}>Výdaj</option></select></label>
       </div>
     </div>
@@ -324,7 +421,7 @@ function render() {
       <div class="main">
         <div class="topbar">
           <div><strong>${state.household?.name || 'Společná domácnost'}</strong></div>
-          <div></div>
+          <div>${state.loading ? 'Načítání...' : ''}</div>
         </div>
         <div class="content">
           ${currentView === 'dashboard' ? renderDashboard() : ''}
@@ -374,6 +471,7 @@ function attachEvents() {
 
 function showTransactionModal(transactionId = null) {
   const transaction = state.transactions.find((t) => t.id === transactionId) || null;
+  const period = getPeriodById(state.currentPeriodId) || state.periods[0];
   const form = `
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
@@ -388,7 +486,7 @@ function showTransactionModal(transactionId = null) {
         <label>Osoba<select name="paid_by"><option value="Viki" ${transaction?.paid_by === 'Viki' ? 'selected' : ''}>Viki</option><option value="Káťa" ${transaction?.paid_by === 'Káťa' ? 'selected' : ''}>Káťa</option><option value="Společné" ${transaction?.paid_by === 'Společné' ? 'selected' : ''}>Společné</option></select></label>
         <label>Poznámka<textarea name="note">${transaction?.note || ''}</textarea></label>
         <div class="row">
-          <button class="btn btn-primary" type="submit">${transaction ? 'Uložit změny' : 'Uložit'}</button>
+          <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${transaction ? 'Uložit změny' : 'Uložit'}</button>
           ${transaction ? '<button class="btn btn-danger" type="button" id="delete-transaction-modal">Smazat</button>' : ''}
         </div>
       </form>
@@ -429,10 +527,8 @@ function showCategoryModal(categoryId = null) {
       <form id="category-form" class="form-grid" style="margin-top:12px;">
         <label>Název<input name="name" required value="${category?.name || ''}"></label>
         <label>Ikona<input name="icon" value="${category?.icon || '📦'}"></label>
-        <label>Barva<input name="color" value="${category?.color || '#2563eb'}"></label>
         <label>Výchozí rozpočet<input name="default_budget" type="number" step="0.01" value="${category?.default_budget || 0}"></label>
-        <label>Rollover mode<select name="rollover_mode"><option value="none" ${category?.rollover_mode === 'none' ? 'selected' : ''}>Nepřenášet</option><option value="positive" ${category?.rollover_mode === 'positive' ? 'selected' : ''}>Jen kladný</option><option value="both" ${category?.rollover_mode === 'both' ? 'selected' : ''}>Kladný i záporný</option></select></label>
-        <button class="btn btn-primary" type="submit">${category ? 'Uložit' : 'Přidat'}</button>
+        <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${category ? 'Uložit' : 'Přidat'}</button>
       </form>
     </div>`;
   showModal(form);
@@ -466,7 +562,7 @@ function showPeriodModal(periodId = null) {
         <label>Název<input name="name" required value="${period?.name || ''}"></label>
         <label>Začátek<input name="start_date" type="date" required value="${period?.start_date || getToday()}"></label>
         <label>Konec<input name="end_date" type="date" required value="${period?.end_date || getToday()}"></label>
-        <button class="btn btn-primary" type="submit">${period ? 'Uložit' : 'Vytvořit'}</button>
+        <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${period ? 'Uložit' : 'Vytvořit'}</button>
       </form>
     </div>`;
   showModal(form);
@@ -477,14 +573,10 @@ function showPeriodModal(periodId = null) {
     const payload = Object.fromEntries(formData.entries());
     payload.status = 'active';
     if (period) {
-      const idx = state.periods.findIndex((p) => p.id === period.id);
-      state.periods[idx] = { ...state.periods[idx], ...payload };
-      state.status = { type: 'success', message: 'Období upraveno.' };
+      updatePeriod(period.id, payload);
     } else {
       createPeriod(payload);
     }
-    saveState();
-    render();
     closeModal();
   });
 }
@@ -516,4 +608,14 @@ function showCategoryDetailModal(categoryId) {
   document.getElementById('close-modal').addEventListener('click', closeModal);
 }
 
-loadState();
+window.addEventListener('online', () => {
+  state.status = { type: 'info', message: 'Připojení je zpět.' };
+  render();
+});
+window.addEventListener('offline', () => {
+  state.status = { type: 'error', message: 'Zařízení je offline.' };
+  render();
+});
+
+initSupabase();
+loadAllData();
