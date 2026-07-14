@@ -1,5 +1,5 @@
-const supabaseUrl = 'https://YOUR_SUPABASE_URL';
-const supabaseAnonKey = 'YOUR_ANON_KEY';
+const supabaseUrl = 'https://kzucqgkbzmwcjzdhlbgj.supabase.co';
+const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6dWNxZ2tiem13Y2p6ZGhsYmdqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQwNDEwMTksImV4cCI6MjA5OTYxNzAxOX0.BfwqRhXJcHZHZdku2_pl1yw61BnpfKAys-tThzzXDVI';
 
 let supabaseClient;
 let currentView = 'dashboard';
