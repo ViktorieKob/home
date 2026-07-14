@@ -103,6 +103,7 @@ async function supabaseCall(method, table, filters = {}, data = null) {
   
   const options = {
     method,
+    mode: 'cors',
     headers: {
       'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
       'apikey': SUPABASE_ANON_KEY,
@@ -112,6 +113,12 @@ async function supabaseCall(method, table, filters = {}, data = null) {
   
   if (method !== 'GET' && data) {
     options.body = JSON.stringify(data);
+  }
+  
+  if (params.toString()) {
+    url += '?' + params.toString() + `&apikey=${encodeURIComponent(SUPABASE_ANON_KEY)}`;
+  } else {
+    url += `?apikey=${encodeURIComponent(SUPABASE_ANON_KEY)}`;
   }
   
   const response = await fetch(url, options);
