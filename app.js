@@ -1,7 +1,6 @@
-const supabaseUrl = 'https://kzucqgkbzmwcjzdhlbgj.supabase.co';
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6dWNxZ2tiem13Y2p6ZGhsYmdqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQwNDEwMTksImV4cCI6MjA5OTYxNzAxOX0.BfwqRhXJcHZHZdku2_pl1yw61BnpfKAys-tThzzXDVI';
+const SUPABASE_URL = 'https://kzucqgkbzmwcjzdhlbgj.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6dWNxZ2tiem13Y2p6ZGhsYmdqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQwNDEwMTksImV4cCI6MjA5OTYxNzAxOX0.BfwqRhXJcHZHZdku2_pl1yw61BnpfKAys-tThzzXDVI';
 
-let supabaseClient;
 let currentView = 'dashboard';
 let state = {
   household: { id: null, name: 'Viki & Káťa', budget_start_day: 1 },
@@ -17,6 +16,7 @@ let state = {
 const appRoot = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
 
+// Helper functions
 function formatCurrency(value) {
   const amount = Number(value || 0);
   return `${amount.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Kč`;
@@ -32,6 +32,9 @@ function safeNumber(value) {
 }
 function getToday() {
   return new Date().toISOString().slice(0, 10);
+}
+function generateId() {
+  return Math.random().toString(36).substr(2, 9);
 }
 function getPeriodById(id) {
   return state.periods.find((p) => p.id === id) || null;
@@ -79,26 +82,55 @@ function calculatePeriodSummary(period) {
   return { incomes, expenses, balance, categoryBudgetTotal, rolloverTotal, availableTotal, spentTotal, remainingTotal };
 }
 
-function initSupabase() {
-  if (supabaseClient) return supabaseClient;
-  if (typeof window.supabase?.createClient !== 'function') {
-    state.status = { type: 'error', message: 'Chyba: Supabase klient se nepodařilo načíst. Zkontrolujte připojení.' };
-    render();
-    return null;
+// Supabase API calls using fetch
+async function supabaseCall(method, table, filters = {}, data = null) {
+  let url = `${SUPABASE_URL}/rest/v1/${table}`;
+  const params = new URLSearchParams();
+  
+  if (method === 'GET') {
+    Object.entries(filters).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        params.append(key, value.join(','));
+      } else if (value !== undefined && value !== null && value !== 'all') {
+        params.append(key, value);
+      }
+    });
   }
-  supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
-  return supabaseClient;
+  
+  if (params.toString()) {
+    url += '?' + params.toString();
+  }
+  
+  const options = {
+    method,
+    headers: {
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'apikey': SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json',
+    },
+  };
+  
+  if (method !== 'GET' && data) {
+    options.body = JSON.stringify(data);
+  }
+  
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(error || `HTTP ${response.status}`);
+  }
+  return response.json();
 }
 
 async function loadAllData() {
   state.loading = true;
   render();
   try {
-    const [{ data: households }, { data: periods }, { data: categories }, { data: transactions }] = await Promise.all([
-      supabaseClient.from('households').select('*').limit(1),
-      supabaseClient.from('budget_periods').select('*').order('start_date', { ascending: false }),
-      supabaseClient.from('categories').select('*').order('name'),
-      supabaseClient.from('transactions').select('*').order('transaction_date', { ascending: false }),
+    const [households, periods, categories, transactions] = await Promise.all([
+      supabaseCall('GET', 'households', { limit: 1 }),
+      supabaseCall('GET', 'budget_periods', { order: 'start_date.desc' }),
+      supabaseCall('GET', 'categories', { order: 'name.asc' }),
+      supabaseCall('GET', 'transactions', { order: 'transaction_date.desc' }),
     ]);
     
     if (households?.length) {
@@ -113,35 +145,31 @@ async function loadAllData() {
     }
     state.status = null;
   } catch (error) {
-    state.status = { type: 'error', message: 'Chyba při načítání dat: ' + error.message };
+    state.status = { type: 'error', message: 'Chyba při načítání: ' + error.message };
   }
   state.loading = false;
   render();
 }
 
 async function insertTransaction(formData) {
-  if (!navigator.onLine) {
-    state.status = { type: 'error', message: 'Zařízení je offline. Nelze uložit.' };
-    render();
-    return false;
-  }
   state.loading = true;
   render();
   
   const payload = {
-    household_id: state.household.id,
-    period_id: getPeriodForDate(formData.transaction_date),
+    household_id: state.household.id || generateId(),
+    period_id: getPeriodForDate(formData.transaction_date) || generateId(),
     type: formData.type,
     amount: Number(formData.amount),
     category_id: formData.type === 'expense' ? formData.category_id : null,
     paid_by: formData.paid_by,
     transaction_date: formData.transaction_date,
     note: formData.note,
+    id: generateId(),
+    created_at: getToday(),
   };
   
   try {
-    const { error } = await supabaseClient.from('transactions').insert([payload]);
-    if (error) throw error;
+    await supabaseCall('POST', 'transactions', {}, payload);
     state.status = { type: 'success', message: 'Transakce uložena.' };
     await loadAllData();
   } catch (error) {
@@ -163,8 +191,7 @@ async function updateTransaction(id, payload) {
   };
   
   try {
-    const { error } = await supabaseClient.from('transactions').update(nextPayload).eq('id', id);
-    if (error) throw error;
+    await supabaseCall('PATCH', `transactions?id=eq.${id}`, {}, nextPayload);
     state.status = { type: 'success', message: 'Transakce upravena.' };
     await loadAllData();
   } catch (error) {
@@ -180,8 +207,7 @@ async function deleteTransaction(id) {
   render();
   
   try {
-    const { error } = await supabaseClient.from('transactions').delete().eq('id', id);
-    if (error) throw error;
+    await supabaseCall('DELETE', `transactions?id=eq.${id}`);
     state.status = { type: 'success', message: 'Transakce smazána.' };
     await loadAllData();
   } catch (error) {
@@ -195,11 +221,15 @@ async function createPeriod(payload) {
   state.loading = true;
   render();
   
-  const nextPayload = { ...payload, household_id: state.household.id };
+  const nextPayload = {
+    ...payload,
+    household_id: state.household.id || generateId(),
+    id: generateId(),
+    created_at: getToday(),
+  };
   
   try {
-    const { error } = await supabaseClient.from('budget_periods').insert([nextPayload]);
-    if (error) throw error;
+    await supabaseCall('POST', 'budget_periods', {}, nextPayload);
     state.status = { type: 'success', message: 'Období vytvořeno.' };
     await loadAllData();
   } catch (error) {
@@ -213,11 +243,16 @@ async function createCategory(payload) {
   state.loading = true;
   render();
   
-  const nextPayload = { ...payload, household_id: state.household.id };
+  const nextPayload = {
+    ...payload,
+    household_id: state.household.id || generateId(),
+    id: generateId(),
+    created_at: getToday(),
+    active: true,
+  };
   
   try {
-    const { error } = await supabaseClient.from('categories').insert([nextPayload]);
-    if (error) throw error;
+    await supabaseCall('POST', 'categories', {}, nextPayload);
     state.status = { type: 'success', message: 'Kategorie vytvořena.' };
     await loadAllData();
   } catch (error) {
@@ -232,8 +267,7 @@ async function updateCategory(id, payload) {
   render();
   
   try {
-    const { error } = await supabaseClient.from('categories').update(payload).eq('id', id);
-    if (error) throw error;
+    await supabaseCall('PATCH', `categories?id=eq.${id}`, {}, payload);
     state.status = { type: 'success', message: 'Kategorie upravena.' };
     await loadAllData();
   } catch (error) {
@@ -248,8 +282,7 @@ async function updatePeriod(id, payload) {
   render();
   
   try {
-    const { error } = await supabaseClient.from('budget_periods').update(payload).eq('id', id);
-    if (error) throw error;
+    await supabaseCall('PATCH', `budget_periods?id=eq.${id}`, {}, payload);
     state.status = { type: 'success', message: 'Období upraveno.' };
     await loadAllData();
   } catch (error) {
@@ -259,6 +292,7 @@ async function updatePeriod(id, payload) {
   }
 }
 
+// UI functions
 function setView(view) {
   currentView = view;
   render();
@@ -272,6 +306,7 @@ function closeModal() {
   modalRoot.classList.add('hidden');
 }
 
+// Render functions
 function renderDashboard() {
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
   const previousPeriod = state.periods.find((p) => p.id !== period?.id) || null;
@@ -302,7 +337,7 @@ function renderDashboard() {
       </div>
       <div class="grid grid-2" style="margin-top:16px;">
         <div class="card">
-          <h3>Srovnání s předchozím obdobím</h3>
+          <h3>Srovnání s předchozím období</h3>
           ${previousSummary ? `
             <div class="list">
               <div class="list-item">Příjmy: ${formatCurrency(summary.incomes)} vs ${formatCurrency(previousSummary.incomes)}</div>
@@ -617,5 +652,4 @@ window.addEventListener('offline', () => {
   render();
 });
 
-initSupabase();
 loadAllData();
