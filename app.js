@@ -122,10 +122,29 @@ async function supabaseCall(method, table, filters = {}, data = null) {
   return response.json();
 }
 
+async function ensureDefaultHousehold() {
+  if (state.household?.id) return;
+  try {
+    const households = await supabaseCall('GET', 'households', { limit: 1 });
+    if (households?.length) {
+      state.household = households[0];
+      return;
+    }
+    await supabaseCall('POST', 'households', {}, { name: 'Viki & Káťa', budget_start_day: 1 });
+    const newHouseholds = await supabaseCall('GET', 'households', { limit: 1 });
+    if (newHouseholds?.length) {
+      state.household = newHouseholds[0];
+    }
+  } catch (error) {
+    state.status = { type: 'error', message: 'Chyba při vytváření domácnosti: ' + error.message };
+  }
+}
+
 async function loadAllData() {
   state.loading = true;
   render();
   try {
+    await ensureDefaultHousehold();
     const [households, periods, categories, transactions] = await Promise.all([
       supabaseCall('GET', 'households', { limit: 1 }),
       supabaseCall('GET', 'budget_periods', { order: 'start_date.desc' }),
@@ -156,17 +175,18 @@ async function insertTransaction(formData) {
   render();
   
   const payload = {
-    household_id: state.household.id || generateId(),
-    period_id: getPeriodForDate(formData.transaction_date) || generateId(),
+    household_id: state.household.id,
+    period_id: getPeriodForDate(formData.transaction_date),
     type: formData.type,
     amount: Number(formData.amount),
     category_id: formData.type === 'expense' ? formData.category_id : null,
     paid_by: formData.paid_by,
     transaction_date: formData.transaction_date,
     note: formData.note,
-    id: generateId(),
-    created_at: getToday(),
   };
+  if (!payload.household_id) {
+    throw new Error('Neexistující domácnost. Prosím vytvořte domácnost nebo obnovte stránku.');
+  }
   
   try {
     await supabaseCall('POST', 'transactions', {}, payload);
@@ -223,9 +243,7 @@ async function createPeriod(payload) {
   
   const nextPayload = {
     ...payload,
-    household_id: state.household.id || generateId(),
-    id: generateId(),
-    created_at: getToday(),
+    household_id: state.household.id,
   };
   
   try {
