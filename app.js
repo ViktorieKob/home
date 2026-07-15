@@ -6,6 +6,7 @@ let state = {
   household: { id: null, name: 'Viki & Káťa', budget_start_day: 1 },
   periods: [],
   categories: [],
+  periodBudgets: [],
   transactions: [],
   currentPeriodId: null,
   loading: false,
@@ -155,6 +156,17 @@ function getCategoryById(id) {
 function getTransactionsForPeriod(periodId) {
   return state.transactions.filter((t) => t.period_id === periodId);
 }
+function getPeriodBudgetRecord(categoryId, periodId) {
+  if (!periodId) return null;
+  return state.periodBudgets.find((budget) => budget.category_id === categoryId && budget.period_id === periodId) || null;
+}
+function getPreviousPeriod(period) {
+  if (!period) return null;
+  const previousPeriods = state.periods
+    .filter((candidate) => candidate.id !== period.id && candidate.end_date < period.start_date)
+    .sort((a, b) => b.end_date.localeCompare(a.end_date));
+  return previousPeriods[0] || null;
+}
 function getPeriodForDate(dateValue) {
   const targetDate = new Date(dateValue);
   const matchingPeriod = state.periods.find((period) => {
@@ -168,15 +180,20 @@ function getExpensesForCategory(categoryId, periodId) {
   return state.transactions.filter((t) => t.category_id === categoryId && t.type === 'expense' && t.period_id === periodId).reduce((sum, t) => sum + safeNumber(t.amount), 0);
 }
 function computeCategoryMetrics(category, period) {
+  if (!period) {
+    return { expenses: 0, baseBudget: safeNumber(category.default_budget), rolloverAmount: 0, manualAdjustment: 0, totalAvailable: safeNumber(category.default_budget), remaining: safeNumber(category.default_budget), usagePercent: 0, baseUsagePercent: 100 };
+  }
   const expenses = getExpensesForCategory(category.id, period.id);
-  const baseBudget = safeNumber(category.default_budget);
-  const rolloverAmount = safeNumber(category.rollover_amount ?? 0);
-  const manualAdjustment = safeNumber(category.manual_adjustment ?? 0);
-  const totalAvailable = baseBudget + rolloverAmount + manualAdjustment;
+  const periodBudget = getPeriodBudgetRecord(category.id, period.id);
+  const baseBudget = safeNumber(periodBudget?.base_budget ?? category.default_budget);
+  const rolloverAmount = safeNumber(periodBudget?.rollover_amount ?? 0);
+  const manualAdjustment = safeNumber(periodBudget?.manual_adjustment ?? 0);
+  const computedAvailable = baseBudget + rolloverAmount + manualAdjustment;
+  const totalAvailable = safeNumber(periodBudget?.total_available ?? computedAvailable);
   const remaining = totalAvailable - expenses;
   const usagePercent = totalAvailable > 0 ? (expenses / totalAvailable) * 100 : (expenses > 0 ? 100 : 0);
   const baseUsagePercent = baseBudget > 0 ? (totalAvailable / baseBudget) * 100 : 0;
-  return { expenses, totalAvailable, remaining, usagePercent, baseUsagePercent };
+  return { expenses, baseBudget, rolloverAmount, manualAdjustment, totalAvailable, remaining, usagePercent, baseUsagePercent };
 }
 function calculatePeriodSummary(period) {
   const tx = getTransactionsForPeriod(period.id);
@@ -184,12 +201,65 @@ function calculatePeriodSummary(period) {
   const expenses = tx.filter((t) => t.type === 'expense').reduce((sum, t) => sum + safeNumber(t.amount), 0);
   const balance = incomes - expenses;
   const categories = state.categories.filter((c) => c.active !== false);
-  const categoryBudgetTotal = categories.reduce((sum, c) => sum + safeNumber(c.default_budget), 0);
-  const rolloverTotal = categories.reduce((sum, c) => sum + safeNumber(c.rollover_amount ?? 0), 0);
-  const availableTotal = categoryBudgetTotal + rolloverTotal;
-  const spentTotal = categories.reduce((sum, c) => sum + getExpensesForCategory(c.id, period.id), 0);
+  const metricsByCategory = categories.map((category) => computeCategoryMetrics(category, period));
+  const categoryBudgetTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.baseBudget), 0);
+  const rolloverTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.rolloverAmount), 0);
+  const availableTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.totalAvailable), 0);
+  const spentTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.expenses), 0);
   const remainingTotal = availableTotal - spentTotal;
   return { incomes, expenses, balance, categoryBudgetTotal, rolloverTotal, availableTotal, spentTotal, remainingTotal };
+}
+
+async function createPeriodBudgetsForPeriod(period) {
+  if (!period?.id) return;
+
+  const existingBudgets = await supabaseCall('GET', 'period_budgets', { period_id: `eq.${period.id}`, limit: 1 });
+  if (existingBudgets?.length) return;
+
+  const previousPeriod = getPreviousPeriod(period);
+  const activeCategories = state.categories.filter((category) => category.active !== false);
+  if (!activeCategories.length) return;
+
+  const budgetRows = activeCategories.map((category) => {
+    const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
+    const rolloverAmount = Math.max(safeNumber(previousMetrics?.remaining ?? 0), 0);
+    const baseBudget = safeNumber(category.default_budget);
+    const manualAdjustment = 0;
+    const totalAvailable = baseBudget + rolloverAmount + manualAdjustment;
+
+    return {
+      period_id: period.id,
+      category_id: category.id,
+      base_budget: baseBudget,
+      rollover_amount: rolloverAmount,
+      manual_adjustment: manualAdjustment,
+      total_available: totalAvailable,
+    };
+  });
+
+  await supabaseCall('POST', 'period_budgets', {}, budgetRows);
+}
+
+async function createBudgetForCategoryInCurrentPeriod(category) {
+  const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
+  if (!period?.id || !category?.id) return;
+
+  const existing = getPeriodBudgetRecord(category.id, period.id);
+  if (existing) return;
+
+  const previousPeriod = getPreviousPeriod(period);
+  const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
+  const rolloverAmount = Math.max(safeNumber(previousMetrics?.remaining ?? 0), 0);
+  const baseBudget = safeNumber(category.default_budget);
+
+  await supabaseCall('POST', 'period_budgets', {}, {
+    period_id: period.id,
+    category_id: category.id,
+    base_budget: baseBudget,
+    rollover_amount: rolloverAmount,
+    manual_adjustment: 0,
+    total_available: baseBudget + rolloverAmount,
+  });
 }
 
 // Supabase API calls using fetch
@@ -262,10 +332,11 @@ async function loadAllData() {
   render();
   try {
     await ensureDefaultHousehold();
-    const [households, periods, categories, transactions] = await Promise.all([
+    const [households, periods, categories, periodBudgets, transactions] = await Promise.all([
       supabaseCall('GET', 'households', { limit: 1 }),
       supabaseCall('GET', 'budget_periods', { order: 'start_date.desc' }),
       supabaseCall('GET', 'categories', { order: 'name.asc' }),
+      supabaseCall('GET', 'period_budgets', { order: 'created_at.desc' }),
       supabaseCall('GET', 'transactions', { order: 'transaction_date.desc' }),
     ]);
     
@@ -274,6 +345,7 @@ async function loadAllData() {
     }
     state.periods = periods || [];
     state.categories = categories || [];
+    state.periodBudgets = periodBudgets || [];
     state.transactions = transactions || [];
     
     if (!state.currentPeriodId && state.periods.length) {
@@ -365,6 +437,17 @@ async function createPeriod(payload) {
   
   try {
     await supabaseCall('POST', 'budget_periods', {}, nextPayload);
+    const createdPeriods = await supabaseCall('GET', 'budget_periods', {
+      household_id: `eq.${state.household.id}`,
+      start_date: `eq.${nextPayload.start_date}`,
+      end_date: `eq.${nextPayload.end_date}`,
+      order: 'created_at.desc',
+      limit: 1,
+    });
+    const createdPeriod = createdPeriods?.[0] || null;
+    if (createdPeriod) {
+      await createPeriodBudgetsForPeriod(createdPeriod);
+    }
     state.status = { type: 'success', message: 'Období vytvořeno.' };
     await loadAllData();
   } catch (error) {
@@ -389,6 +472,16 @@ async function createCategory(payload) {
   
   try {
     await supabaseCall('POST', 'categories', {}, nextPayload);
+    const createdCategories = await supabaseCall('GET', 'categories', {
+      household_id: `eq.${state.household.id}`,
+      name: `eq.${nextPayload.name}`,
+      order: 'created_at.desc',
+      limit: 1,
+    });
+    const createdCategory = createdCategories?.[0] || null;
+    if (createdCategory) {
+      await createBudgetForCategoryInCurrentPeriod(createdCategory);
+    }
     state.status = { type: 'success', message: 'Kategorie vytvořena.' };
     await loadAllData();
   } catch (error) {
@@ -518,6 +611,7 @@ function renderDashboard() {
                     <strong>${category.name}</strong>
                     <span class="badge ${pct >= 100 ? 'badge-danger' : pct >= 90 ? 'badge-warning' : 'badge-success'}">${formatPercent(metrics.usagePercent)}</span>
                   </div>
+                  <div style="color:var(--muted); margin-top:6px; font-size:13px;">Rozpočet období ${formatCurrency(metrics.baseBudget)} · Převod ${formatCurrency(metrics.rolloverAmount)}</div>
                   <div class="progress"><span class="${className}" style="width:${Math.min(pct, 100)}%"></span></div>
                   <div class="row" style="justify-content: space-between; margin-top:8px;">
                     <span>Vyčerpáno ${formatCurrency(metrics.expenses)}</span>
@@ -798,7 +892,7 @@ function showCategoryDetailModal(categoryId) {
   const category = state.categories.find((c) => c.id === categoryId);
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
   const transactions = state.transactions.filter((t) => t.category_id === categoryId && t.type === 'expense');
-  const metrics = period && category ? computeCategoryMetrics(category, period) : { expenses:0, totalAvailable:0, remaining:0, usagePercent:0 };
+  const metrics = period && category ? computeCategoryMetrics(category, period) : { expenses:0, baseBudget:0, rolloverAmount:0, manualAdjustment:0, totalAvailable:0, remaining:0, usagePercent:0 };
   showModal(`
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
@@ -806,8 +900,8 @@ function showCategoryDetailModal(categoryId) {
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <div class="list" style="margin-top:12px;">
-        <div class="list-item">Rozpočet: ${formatCurrency(category?.default_budget || 0)}</div>
-        <div class="list-item">Přenos: ${formatCurrency(category?.rollover_amount || 0)}</div>
+        <div class="list-item">Rozpočet období: ${formatCurrency(metrics.baseBudget || 0)}</div>
+        <div class="list-item">Převedeno z minulého: ${formatCurrency(metrics.rolloverAmount || 0)}</div>
         <div class="list-item">Celkem k dispozici: ${formatCurrency(metrics.totalAvailable)}</div>
         <div class="list-item">Vyčerpáno: ${formatCurrency(metrics.expenses)}</div>
         <div class="list-item">Zbývá: ${formatCurrency(metrics.remaining)}</div>
