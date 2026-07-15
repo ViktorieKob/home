@@ -634,6 +634,96 @@ function showExpenseBucketModal(level, key, periodId) {
   document.getElementById('close-modal')?.addEventListener('click', closeModal);
 }
 
+function normalizeLabel(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function getCategoryAccountGroup(category) {
+  if (!category || category.type !== 'expense') return 'shared';
+  if (isCategorySplitEnabled(category)) return 'shared';
+
+  const name = normalizeLabel(category.name);
+  const vikiNames = ['najem', 'psi', 'pojisteni', 'tv/internet', 'predplatne', 'jidlo v praci'];
+  const kataNames = ['drogerie', 'pohonne hmoty'];
+
+  if (vikiNames.some((label) => name.includes(label))) return 'viki';
+  if (kataNames.some((label) => name.includes(label))) return 'kata';
+  return 'shared';
+}
+
+function getAccountEnvelopeGroups(period) {
+  const groups = {
+    viki: { id: 'viki', title: 'Účet Viki', icon: '🟦', rows: [], available: 0, spent: 0, remaining: 0 },
+    kata: { id: 'kata', title: 'Účet Káťa', icon: '🟩', rows: [], available: 0, spent: 0, remaining: 0 },
+    shared: { id: 'shared', title: 'Společné', icon: '🟨', rows: [], available: 0, spent: 0, remaining: 0 },
+  };
+
+  if (!period?.id) return groups;
+
+  state.categories
+    .filter((category) => category.active !== false && category.type === 'expense')
+    .forEach((category) => {
+      const metrics = computeCategoryMetrics(category, period);
+      const split = computeCategoryPersonSplit(category, period.id, metrics.totalAvailable);
+      const groupId = getCategoryAccountGroup(category);
+      const row = {
+        category,
+        metrics,
+        split,
+      };
+
+      groups[groupId].rows.push(row);
+      groups[groupId].available += safeNumber(metrics.totalAvailable);
+      groups[groupId].spent += safeNumber(metrics.expenses);
+      groups[groupId].remaining += safeNumber(metrics.remaining);
+    });
+
+  Object.values(groups).forEach((group) => {
+    group.rows.sort((a, b) => safeNumber(b.metrics.totalAvailable) - safeNumber(a.metrics.totalAvailable));
+  });
+
+  return groups;
+}
+
+function renderAccountEnvelopeGroups(period) {
+  const groups = getAccountEnvelopeGroups(period);
+  const ordered = [groups.viki, groups.kata, groups.shared];
+
+  return `
+    <div class="account-groups-grid">
+      ${ordered.map((group) => `
+        <div class="account-group-card account-${group.id}">
+          <div class="account-group-header">
+            <strong>${group.icon} ${group.title}</strong>
+            <span>${formatCurrency(group.remaining)} zbývá</span>
+          </div>
+          <div class="account-group-meta">Rozpočty ${formatCurrency(group.available)} · Vyčerpáno ${formatCurrency(group.spent)}</div>
+          <div class="account-group-list">
+            ${group.rows.length ? group.rows.map((row) => {
+              const usage = Math.min(100, Math.max(0, safeNumber(row.metrics.usagePercent)));
+              return `
+                <button class="account-envelope-item" type="button" data-category-id="${row.category.id}">
+                  <div class="account-envelope-header">
+                    <strong>${row.category.icon || '📦'} ${row.category.name}</strong>
+                    <span>${formatCurrency(row.metrics.remaining)}</span>
+                  </div>
+                  <div class="account-envelope-track"><span style="width:${usage}%"></span></div>
+                  <div class="account-envelope-meta">${formatCurrency(row.metrics.expenses)} / ${formatCurrency(row.metrics.totalAvailable)}</div>
+                  ${row.split ? `<div class="account-envelope-split">Viki ${formatCurrency(row.split.vikiRemaining)} · Káťa ${formatCurrency(row.split.kataRemaining)}</div>` : ''}
+                </button>
+              `;
+            }).join('') : '<div class="empty">Žádné rozpočty ve skupině</div>'}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
 function roundMoney(value) {
   return Math.round(safeNumber(value) * 100) / 100;
 }
@@ -1829,29 +1919,8 @@ function renderDashboard() {
           ` : '<div class="empty">Bez dat k porovnání</div>'}
         </div>
         <div class="card">
-          <h3>Přehled kategorií</h3>
-          <div class="list">
-            ${state.categories.filter((c) => c.active !== false).length ? state.categories.filter((c) => c.active !== false).map((category) => {
-              const metrics = computeCategoryMetrics(category, period);
-              const split = period ? computeCategoryPersonSplit(category, period.id, metrics.totalAvailable) : null;
-              const pct = Math.min(metrics.usagePercent, 100);
-              const className = pct >= 100 ? 'progress-danger' : pct >= 90 ? 'progress-warn' : 'progress-good';
-              return `
-                <div class="category-card" data-category-id="${category.id}" style="cursor:pointer;">
-                  <div class="row" style="justify-content: space-between; align-items:center;">
-                    <strong>${category.name}</strong>
-                    <span class="badge ${pct >= 100 ? 'badge-danger' : pct >= 90 ? 'badge-warning' : 'badge-success'}">${formatPercent(metrics.usagePercent)}</span>
-                  </div>
-                  <div style="color:var(--muted); margin-top:6px; font-size:13px;">Rozpočet období ${formatCurrency(metrics.baseBudget)} · Převod ${formatCurrency(metrics.rolloverAmount)}</div>
-                  <div class="progress"><span class="${className}" style="width:${Math.min(pct, 100)}%"></span></div>
-                  <div class="row" style="justify-content: space-between; margin-top:8px;">
-                    <span>Vyčerpáno ${formatCurrency(metrics.expenses)}</span>
-                    <span>Zbývá ${formatCurrency(metrics.remaining)}</span>
-                  </div>
-                  ${split ? `<div class="split-grid"><div class="split-item"><strong>Viki</strong><span>${formatCurrency(split.vikiRemaining)} zbývá</span><small>${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)}</small><small>Převod ${formatCurrency(split.rolloverVikiAmount)}</small></div><div class="split-item"><strong>Káťa</strong><span>${formatCurrency(split.kataRemaining)} zbývá</span><small>${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)}</small><small>Převod ${formatCurrency(split.rolloverKataAmount)}</small></div></div>` : ''}
-                </div>`;
-            }).join('') : '<div class="empty">Žádné kategorie</div>'}
-          </div>
+          <h3>Obálky podle účtu</h3>
+          ${renderAccountEnvelopeGroups(period)}
         </div>
       </div>
 
