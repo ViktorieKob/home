@@ -296,7 +296,7 @@ function computeCategoryMetrics(category, period) {
   const rolloverAmount = safeNumber(periodBudget?.rollover_amount ?? 0);
   const manualAdjustment = safeNumber(periodBudget?.manual_adjustment ?? 0);
   const computedAvailable = baseBudget + rolloverAmount + manualAdjustment;
-  const totalAvailable = safeNumber(periodBudget?.total_available ?? computedAvailable);
+  const totalAvailable = computedAvailable;
   const remaining = totalAvailable - expenses;
   const usagePercent = totalAvailable > 0 ? (expenses / totalAvailable) * 100 : (expenses > 0 ? 100 : 0);
   const baseUsagePercent = baseBudget > 0 ? (totalAvailable / baseBudget) * 100 : 0;
@@ -312,12 +312,13 @@ function calculatePeriodSummary(period) {
   const metricsByCategory = categories.map((category) => computeCategoryMetrics(category, period));
   const categoryBudgetTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.baseBudget), 0);
   const rolloverTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.rolloverAmount), 0);
+  const manualAdjustmentTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.manualAdjustment), 0);
   const availableTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.totalAvailable), 0);
   const spentTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.expenses), 0);
   const remainingTotal = availableTotal - spentTotal;
-  const plannedTotal = categoryBudgetTotal + rolloverTotal;
+  const plannedTotal = categoryBudgetTotal + manualAdjustmentTotal;
   const freeCash = balance - plannedTotal;
-  return { incomes, expenses, openingBalance, balance, categoryBudgetTotal, rolloverTotal, availableTotal, spentTotal, remainingTotal, plannedTotal, freeCash };
+  return { incomes, expenses, openingBalance, balance, categoryBudgetTotal, rolloverTotal, manualAdjustmentTotal, availableTotal, spentTotal, remainingTotal, plannedTotal, freeCash };
 }
 
 async function ensureCurrentPeriodWithConfirmation() {
@@ -398,34 +399,28 @@ async function createBudgetForCategoryInCurrentPeriod(category) {
   }
 }
 
-async function ensurePersonalCategories() {
-  if (!state.household?.id) return;
+async function cleanupDuplicatePersonalCategories() {
+  if (!state.household?.id || !state.categories.length) return;
 
-  for (const item of PERSONAL_BUDGETS) {
-    const existingRows = await supabaseCall('GET', 'categories', {
-      household_id: `eq.${state.household.id}`,
-      name: `eq.${item.name}`,
-      limit: 1,
-    });
-    const existing = existingRows?.[0] || null;
-    if (existing) {
-      if (safeNumber(existing.default_budget) !== item.amount || existing.active === false) {
-        await supabaseCall('PATCH', 'categories', { id: `eq.${existing.id}` }, {
-          default_budget: item.amount,
-          active: true,
-        });
-      }
-      continue;
+  const personalNames = new Set(PERSONAL_BUDGETS.map((item) => item.name.toLowerCase()));
+  const grouped = new Map();
+
+  state.categories.forEach((category) => {
+    const nameKey = String(category.name || '').trim().toLowerCase();
+    if (!personalNames.has(nameKey)) return;
+    if (!grouped.has(nameKey)) {
+      grouped.set(nameKey, []);
     }
+    grouped.get(nameKey).push(category);
+  });
 
-    await supabaseCall('POST', 'categories', {}, {
-      household_id: state.household.id,
-      name: item.name,
-      type: 'expense',
-      icon: item.icon,
-      default_budget: item.amount,
-      active: true,
-    });
+  for (const rows of grouped.values()) {
+    if (rows.length <= 1) continue;
+    const sorted = [...rows].sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+    const duplicates = sorted.slice(1);
+    for (const duplicate of duplicates) {
+      await supabaseCall('DELETE', 'categories', { id: `eq.${duplicate.id}` });
+    }
   }
 }
 
@@ -605,7 +600,7 @@ async function loadAllData() {
     state.recurringTransactions = recurringTransactions || [];
     state.transactions = transactions || [];
 
-    await ensurePersonalCategories();
+    await cleanupDuplicatePersonalCategories();
     state.categories = await supabaseCall('GET', 'categories', { order: 'name.asc' });
 
     if (state.recurringTransactions.length) {
@@ -784,6 +779,22 @@ async function updateCategory(id, payload) {
   try {
     await supabaseCall('PATCH', 'categories', { id: `eq.${id}` }, payload);
     state.status = { type: 'success', message: 'Kategorie upravena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
+async function deleteCategory(id) {
+  if (!confirm('Opravdu chcete smazat tuto kategorii i její rozpočty v obdobích?')) return;
+  state.loading = true;
+  render();
+
+  try {
+    await supabaseCall('DELETE', 'categories', { id: `eq.${id}` });
+    state.status = { type: 'success', message: 'Kategorie byla smazána.' };
     await loadAllData();
   } catch (error) {
     state.status = { type: 'error', message: formatApiErrorMessage(error) };
@@ -1127,7 +1138,7 @@ function renderDashboard() {
   const previousPeriod = state.periods.find((p) => p.id !== period?.id) || null;
   const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0 };
   const previousSummary = previousPeriod ? calculatePeriodSummary(previousPeriod) : null;
-  const chartRows = period
+  const expenseRows = period
     ? state.categories
       .filter((category) => category.active !== false)
       .map((category) => {
@@ -1138,7 +1149,39 @@ function renderDashboard() {
       .sort((a, b) => b.spent - a.spent)
       .slice(0, 6)
     : [];
-  const chartMax = chartRows.reduce((max, row) => Math.max(max, row.spent), 0) || 1;
+  const incomeRows = period
+    ? Object.values(state.transactions
+      .filter((transaction) => transaction.period_id === period.id && transaction.type === 'income')
+      .reduce((acc, transaction) => {
+        const key = transaction.category_id || `person:${transaction.paid_by}`;
+        if (!acc[key]) {
+          const categoryName = transaction.category_id ? (getCategoryById(transaction.category_id)?.name || 'Bez kategorie') : `Příjem ${transaction.paid_by}`;
+          acc[key] = { name: categoryName, amount: 0 };
+        }
+        acc[key].amount += safeNumber(transaction.amount);
+        return acc;
+      }, {}))
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 6)
+    : [];
+  const budgetRows = period
+    ? state.categories
+      .filter((category) => category.active !== false)
+      .map((category) => {
+        const metrics = computeCategoryMetrics(category, period);
+        return {
+          icon: category.icon || '📦',
+          name: category.name,
+          spent: metrics.expenses,
+          available: metrics.totalAvailable,
+        };
+      })
+      .filter((row) => row.available > 0 || row.spent > 0)
+      .sort((a, b) => b.spent - a.spent)
+      .slice(0, 6)
+    : [];
+  const expenseMax = expenseRows.reduce((max, row) => Math.max(max, row.spent), 0) || 1;
+  const incomeMax = incomeRows.reduce((max, row) => Math.max(max, row.amount), 0) || 1;
   return `
     <div class="container">
       <div class="card">
@@ -1160,8 +1203,8 @@ function renderDashboard() {
         <div class="stat-card"><div class="stat-label">Příjmy</div><div class="stat-value">${formatCurrency(summary.incomes)}</div></div>
         <div class="stat-card"><div class="stat-label">Výdaje</div><div class="stat-value">${formatCurrency(summary.expenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Bilance</div><div class="stat-value">${formatCurrency(summary.balance)}</div></div>
-        <div class="stat-card"><div class="stat-label">Zbývá</div><div class="stat-value">${formatCurrency(summary.remainingTotal)}</div></div>
-        <div class="stat-card"><div class="stat-label">Volné mimo rozpočty</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
+        <div class="stat-card"><div class="stat-label">Plán rozpočtů</div><div class="stat-value">${formatCurrency(summary.plannedTotal)}</div></div>
+        <div class="stat-card"><div class="stat-label">Zůstatek mimo kategorie</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
       </div>
       <div class="grid grid-2" style="margin-top:16px;">
         <div class="card">
@@ -1200,9 +1243,23 @@ function renderDashboard() {
         </div>
       </div>
 
+      <div class="grid grid-2" style="margin-top:16px;">
+        <div class="card">
+          <h3>Graf výdajů dle kategorií</h3>
+          ${expenseRows.length ? `<div class="mini-chart" style="margin-top:12px;">${expenseRows.map((row) => `<div class="mini-chart-row"><div class="mini-chart-label">${row.icon} ${row.name}</div><div class="mini-chart-track"><span style="width:${Math.max(8, Math.round((row.spent / expenseMax) * 100))}%"></span></div><div class="mini-chart-value">${formatCurrency(row.spent)}</div></div>`).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Zatím nejsou žádné výdaje v kategoriích.</div>'}
+        </div>
+        <div class="card">
+          <h3>Graf příjmů dle kategorií</h3>
+          ${incomeRows.length ? `<div class="mini-chart" style="margin-top:12px;">${incomeRows.map((row) => `<div class="mini-chart-row"><div class="mini-chart-label">💰 ${row.name}</div><div class="mini-chart-track income"><span style="width:${Math.max(8, Math.round((row.amount / incomeMax) * 100))}%"></span></div><div class="mini-chart-value">${formatCurrency(row.amount)}</div></div>`).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Zatím nejsou žádné příjmy v kategoriích.</div>'}
+        </div>
+      </div>
+
       <div class="card" style="margin-top:16px;">
-        <h3>Největší výdaje období</h3>
-        ${chartRows.length ? `<div class="mini-chart" style="margin-top:12px;">${chartRows.map((row) => `<div class="mini-chart-row"><div class="mini-chart-label">${row.icon} ${row.name}</div><div class="mini-chart-track"><span style="width:${Math.max(10, Math.round((row.spent / chartMax) * 100))}%"></span></div><div class="mini-chart-value">${formatCurrency(row.spent)}</div></div>`).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Zatím nejsou žádné výdaje v kategoriích.</div>'}
+        <h3>Rozpočet vs. čerpání</h3>
+        ${budgetRows.length ? `<div class="list" style="margin-top:12px;">${budgetRows.map((row) => {
+          const ratio = row.available > 0 ? Math.round((row.spent / row.available) * 100) : 0;
+          return `<div class="budget-compare"><div class="budget-compare-header"><strong>${row.icon} ${row.name}</strong><span>${formatCurrency(row.spent)} / ${formatCurrency(row.available)}</span></div><div class="budget-compare-track"><span style="width:${Math.max(4, Math.min(100, ratio))}%"></span></div></div>`;
+        }).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Pro zobrazení grafu vytvoř rozpočet a transakce v období.</div>'}
       </div>
     </div>
   `;
@@ -1267,7 +1324,12 @@ function renderHistory() {
 }
 
 function renderBudgetManagement() {
-  return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat kategorii</button></div><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Fixně: ${formatCurrency(category.default_budget)} · Procento: ${safeNumber(category.allocation_percent)} % (použije se jen pokud fixní=0)</div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button></div></div>`).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
+  const period = getCurrentPeriod();
+  return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat nový rozpočet</button></div><p style="color:var(--muted); margin-top:8px;">Každou kategorii lze upravit, vypnout nebo smazat. Níže vidíš i průběh čerpání rozpočtu v aktuálním období.</p><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => {
+    const metrics = period ? computeCategoryMetrics(category, period) : { expenses: 0, totalAvailable: 0 };
+    const percent = metrics.totalAvailable > 0 ? Math.min(140, Math.round((metrics.expenses / metrics.totalAvailable) * 100)) : 0;
+    return `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Fixně: ${formatCurrency(category.default_budget)} · Procento: ${safeNumber(category.allocation_percent)} % (jen když fixní=0)</div><div class="budget-compare" style="margin-top:8px;"><div class="budget-compare-track"><span style="width:${Math.max(4, Math.min(percent, 100))}%"></span></div><div class="budget-compare-label">Vyčerpáno ${formatCurrency(metrics.expenses)} z ${formatCurrency(metrics.totalAvailable)}</div></div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button><button class="btn btn-danger" data-action="delete-category" data-id="${category.id}">Smazat</button></div></div>`;
+  }).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
 }
 
 function renderPeriods() {
@@ -1474,6 +1536,7 @@ function attachEvents() {
     if (!category) return;
     updateCategory(category.id, { active: category.active === false ? true : false });
   }));
+  document.querySelectorAll('[data-action="delete-category"]').forEach((btn) => btn.addEventListener('click', () => deleteCategory(btn.dataset.id)));
   document.querySelectorAll('[data-action="edit-period"]').forEach((btn) => btn.addEventListener('click', () => showPeriodModal(btn.dataset.id)));
   document.querySelectorAll('[data-action="delete-period"]').forEach((btn) => btn.addEventListener('click', () => deletePeriod(btn.dataset.id)));
   document.getElementById('period-start-day-form')?.addEventListener('submit', (event) => {

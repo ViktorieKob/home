@@ -154,6 +154,9 @@ create policy categories_insert on categories
 drop policy if exists categories_update on categories;
 create policy categories_update on categories
   for update using (exists (select 1 from household_members hm where hm.household_id = categories.household_id and hm.user_id = auth.uid()));
+drop policy if exists categories_delete on categories;
+create policy categories_delete on categories
+  for delete using (exists (select 1 from household_members hm where hm.household_id = categories.household_id and hm.user_id = auth.uid()));
 
 drop policy if exists period_budgets_select on period_budgets;
 create policy period_budgets_select on period_budgets
@@ -225,6 +228,9 @@ create policy categories_public_insert on categories
 drop policy if exists categories_public_update on categories;
 create policy categories_public_update on categories
   for update using (true) with check (true);
+drop policy if exists categories_public_delete on categories;
+create policy categories_public_delete on categories
+  for delete using (true);
 
 drop policy if exists period_budgets_public_select on period_budgets;
 create policy period_budgets_public_select on period_budgets

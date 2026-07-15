@@ -53,6 +53,10 @@ button { cursor: pointer; }
   justify-content: space-between;
   align-items: center;
 }
+.topbar strong {
+  letter-spacing: 0.02em;
+  font-size: 1.02rem;
+}
 .topbar .user { font-weight: 600; }
 .content { padding: 24px; display: flex; flex-direction: column; gap: 18px; }
 .card {
@@ -62,6 +66,14 @@ button { cursor: pointer; }
   padding: 20px;
   box-shadow: 0 14px 30px rgba(22, 81, 48, 0.08);
   animation: rise-in .45s ease both;
+}
+.card h2,
+.card h3 {
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+.card p {
+  margin: 6px 0 0;
 }
 .grid { display: grid; gap: 16px; }
 .grid-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -133,7 +145,45 @@ textarea { min-height: 90px; resize: vertical; }
   border-radius: 999px;
   background: linear-gradient(135deg, var(--primary-2), var(--primary));
 }
+.mini-chart-track.income {
+  background: #d8efe2;
+}
+.mini-chart-track.income span {
+  background: linear-gradient(135deg, #23a264, #13844b);
+}
 .mini-chart-value { text-align: right; color: var(--muted); font-weight: 600; }
+
+.budget-compare {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f7fcf7, #eff8f0);
+}
+.budget-compare-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+.budget-compare-track {
+  height: 12px;
+  border-radius: 999px;
+  background: #dcecdc;
+  overflow: hidden;
+}
+.budget-compare-track span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f2a93b, #d77f1f);
+}
+.budget-compare-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
 
 @keyframes rise-in {
   from { opacity: 0; transform: translateY(6px); }
@@ -144,6 +194,7 @@ textarea { min-height: 90px; resize: vertical; }
   .sidebar { width: 100%; }
   .stat-grid { grid-template-columns: 1fr 1fr; }
   .grid-3 { grid-template-columns: 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
   .mobile-nav { display: flex; }
   .topbar { padding: 14px 16px; }
   .content { padding: 16px; }
