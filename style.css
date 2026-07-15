@@ -118,6 +118,28 @@ textarea { min-height: 90px; resize: vertical; }
 .table th { background: var(--surface-alt); font-size: .9rem; color: var(--muted); }
 .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .category-card { border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: var(--surface-alt); }
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.split-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: #f2f9f3;
+  display: grid;
+  gap: 2px;
+}
+.split-item span {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.split-item small {
+  color: var(--muted);
+}
 .progress { height: 8px; background: #e5e7eb; border-radius: 999px; overflow: hidden; margin-top: 8px; }
 .progress > span { display: block; height: 100%; }
 .progress-good { background: var(--success); }
@@ -205,4 +227,5 @@ textarea { min-height: 90px; resize: vertical; }
   .auth-card { margin: 24px 12px; }
   .mini-chart-row { grid-template-columns: 1fr; gap: 6px; }
   .mini-chart-value { text-align: left; }
+  .split-grid { grid-template-columns: 1fr; }
 }

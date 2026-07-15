@@ -293,7 +293,9 @@ function computeCategoryMetrics(category, period) {
   const expenses = getExpensesForCategory(category.id, period.id);
   const periodBudget = getPeriodBudgetRecord(category.id, period.id);
   const baseBudget = safeNumber(periodBudget?.base_budget ?? computeTargetBudgetForCategory(category, period.id));
-  const rolloverAmount = safeNumber(periodBudget?.rollover_amount ?? 0);
+  const previousPeriod = getPreviousPeriod(period);
+  const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
+  const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
   const manualAdjustment = safeNumber(periodBudget?.manual_adjustment ?? 0);
   const computedAvailable = baseBudget + rolloverAmount + manualAdjustment;
   const totalAvailable = computedAvailable;
@@ -301,6 +303,35 @@ function computeCategoryMetrics(category, period) {
   const usagePercent = totalAvailable > 0 ? (expenses / totalAvailable) * 100 : (expenses > 0 ? 100 : 0);
   const baseUsagePercent = baseBudget > 0 ? (totalAvailable / baseBudget) * 100 : 0;
   return { expenses, baseBudget, rolloverAmount, manualAdjustment, totalAvailable, remaining, usagePercent, baseUsagePercent };
+}
+
+function computeCategoryPersonSplit(categoryId, periodId, totalBudget) {
+  const safeBudget = safeNumber(totalBudget);
+  const perPersonBudget = safeBudget / 2;
+  const personSpend = { viki: 0, kata: 0 };
+
+  state.transactions
+    .filter((transaction) => transaction.period_id === periodId && transaction.category_id === categoryId && transaction.type === 'expense')
+    .forEach((transaction) => {
+      const amount = safeNumber(transaction.amount);
+      if (transaction.paid_by === 'Viki') {
+        personSpend.viki += amount;
+      } else if (transaction.paid_by === 'Káťa') {
+        personSpend.kata += amount;
+      } else {
+        personSpend.viki += amount / 2;
+        personSpend.kata += amount / 2;
+      }
+    });
+
+  return {
+    vikiBudget: perPersonBudget,
+    kataBudget: perPersonBudget,
+    vikiSpent: personSpend.viki,
+    kataSpent: personSpend.kata,
+    vikiRemaining: perPersonBudget - personSpend.viki,
+    kataRemaining: perPersonBudget - personSpend.kata,
+  };
 }
 function calculatePeriodSummary(period) {
   const tx = getTransactionsForPeriod(period.id);
@@ -402,11 +433,17 @@ async function createBudgetForCategoryInCurrentPeriod(category) {
 async function cleanupDuplicatePersonalCategories() {
   if (!state.household?.id || !state.categories.length) return;
 
-  const personalNames = new Set(PERSONAL_BUDGETS.map((item) => item.name.toLowerCase()));
+  const normalizeName = (value) => String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const personalNames = new Set(PERSONAL_BUDGETS.map((item) => normalizeName(item.name)));
   const grouped = new Map();
 
   state.categories.forEach((category) => {
-    const nameKey = String(category.name || '').trim().toLowerCase();
+    const nameKey = normalizeName(category.name);
     if (!personalNames.has(nameKey)) return;
     if (!grouped.has(nameKey)) {
       grouped.set(nameKey, []);
@@ -417,8 +454,11 @@ async function cleanupDuplicatePersonalCategories() {
   for (const rows of grouped.values()) {
     if (rows.length <= 1) continue;
     const sorted = [...rows].sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+    const keeper = sorted[0];
     const duplicates = sorted.slice(1);
     for (const duplicate of duplicates) {
+      await supabaseCall('PATCH', 'transactions', { category_id: `eq.${duplicate.id}`, household_id: `eq.${state.household.id}` }, { category_id: keeper.id });
+      await supabaseCall('PATCH', 'period_budgets', { category_id: `eq.${duplicate.id}` }, { category_id: keeper.id });
       await supabaseCall('DELETE', 'categories', { id: `eq.${duplicate.id}` });
     }
   }
@@ -571,24 +611,27 @@ async function loadAllData() {
   render();
   try {
     await ensureDefaultHousehold();
-    const [households, periods, categories, transactions] = await Promise.all([
-      supabaseCall('GET', 'households', { limit: 1 }),
-      supabaseCall('GET', 'budget_periods', { order: 'start_date.desc' }),
-      supabaseCall('GET', 'categories', { order: 'name.asc' }),
-      supabaseCall('GET', 'transactions', { order: 'transaction_date.desc' }),
+    const householdId = state.household?.id;
+    if (!householdId) {
+      throw new Error('Domácnost nebyla nalezena.');
+    }
+
+    const [households, periods, categories, transactions, recurringTransactions] = await Promise.all([
+      supabaseCall('GET', 'households', { id: `eq.${householdId}`, limit: 1 }),
+      supabaseCall('GET', 'budget_periods', { household_id: `eq.${householdId}`, order: 'start_date.desc' }),
+      supabaseCall('GET', 'categories', { household_id: `eq.${householdId}`, order: 'name.asc' }),
+      supabaseCall('GET', 'transactions', { household_id: `eq.${householdId}`, order: 'transaction_date.desc' }),
+      supabaseCall('GET', 'recurring_transactions', { household_id: `eq.${householdId}`, order: 'created_at.desc' }),
     ]);
 
     let periodBudgets = [];
-    let recurringTransactions = [];
     try {
-      periodBudgets = await supabaseCall('GET', 'period_budgets', { order: 'created_at.desc' });
+      if (periods?.length) {
+        const periodIds = periods.map((period) => period.id).join(',');
+        periodBudgets = await supabaseCall('GET', 'period_budgets', { period_id: `in.(${periodIds})`, order: 'created_at.desc' });
+      }
     } catch (error) {
       console.warn('Period budgets nejsou dostupné:', error);
-    }
-    try {
-      recurringTransactions = await supabaseCall('GET', 'recurring_transactions', { order: 'created_at.desc' });
-    } catch (error) {
-      console.warn('Recurring transactions nejsou dostupné:', error);
     }
     
     if (households?.length) {
@@ -601,12 +644,12 @@ async function loadAllData() {
     state.transactions = transactions || [];
 
     await cleanupDuplicatePersonalCategories();
-    state.categories = await supabaseCall('GET', 'categories', { order: 'name.asc' });
+    state.categories = await supabaseCall('GET', 'categories', { household_id: `eq.${householdId}`, order: 'name.asc' });
 
     if (state.recurringTransactions.length) {
       await runRecurringTransactionsForToday();
-      state.recurringTransactions = await supabaseCall('GET', 'recurring_transactions', { order: 'created_at.desc' });
-      state.transactions = await supabaseCall('GET', 'transactions', { order: 'transaction_date.desc' });
+      state.recurringTransactions = await supabaseCall('GET', 'recurring_transactions', { household_id: `eq.${householdId}`, order: 'created_at.desc' });
+      state.transactions = await supabaseCall('GET', 'transactions', { household_id: `eq.${householdId}`, order: 'transaction_date.desc' });
     }
 
     if (!state.periods.some((period) => period.id === state.currentPeriodId)) {
@@ -797,9 +840,15 @@ async function deleteCategory(id) {
     state.status = { type: 'success', message: 'Kategorie byla smazána.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: formatApiErrorMessage(error) };
-    state.loading = false;
-    render();
+    try {
+      await supabaseCall('PATCH', 'categories', { id: `eq.${id}` }, { active: false });
+      state.status = { type: 'info', message: 'Kategorie nešla fyzicky smazat, byla deaktivována.' };
+      await loadAllData();
+    } catch {
+      state.status = { type: 'error', message: formatApiErrorMessage(error) };
+      state.loading = false;
+      render();
+    }
   }
 }
 
@@ -1223,6 +1272,7 @@ function renderDashboard() {
           <div class="list">
             ${state.categories.filter((c) => c.active !== false).length ? state.categories.filter((c) => c.active !== false).map((category) => {
               const metrics = computeCategoryMetrics(category, period);
+              const split = period ? computeCategoryPersonSplit(category.id, period.id, metrics.totalAvailable) : null;
               const pct = Math.min(metrics.usagePercent, 100);
               const className = pct >= 100 ? 'progress-danger' : pct >= 90 ? 'progress-warn' : 'progress-good';
               return `
@@ -1237,6 +1287,7 @@ function renderDashboard() {
                     <span>Vyčerpáno ${formatCurrency(metrics.expenses)}</span>
                     <span>Zbývá ${formatCurrency(metrics.remaining)}</span>
                   </div>
+                  ${split ? `<div class="split-grid"><div class="split-item"><strong>Viki</strong><span>${formatCurrency(split.vikiRemaining)} zbývá</span><small>${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)}</small></div><div class="split-item"><strong>Káťa</strong><span>${formatCurrency(split.kataRemaining)} zbývá</span><small>${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)}</small></div></div>` : ''}
                 </div>`;
             }).join('') : '<div class="empty">Žádné kategorie</div>'}
           </div>
@@ -1802,6 +1853,7 @@ function showCategoryDetailModal(categoryId) {
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
   const transactions = state.transactions.filter((t) => t.category_id === categoryId && t.type === 'expense');
   const metrics = period && category ? computeCategoryMetrics(category, period) : { expenses:0, baseBudget:0, rolloverAmount:0, manualAdjustment:0, totalAvailable:0, remaining:0, usagePercent:0 };
+  const split = period && category ? computeCategoryPersonSplit(category.id, period.id, metrics.totalAvailable) : null;
   showModal(`
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
@@ -1814,6 +1866,7 @@ function showCategoryDetailModal(categoryId) {
         <div class="list-item">Celkem k dispozici: ${formatCurrency(metrics.totalAvailable)}</div>
         <div class="list-item">Vyčerpáno: ${formatCurrency(metrics.expenses)}</div>
         <div class="list-item">Zbývá: ${formatCurrency(metrics.remaining)}</div>
+        ${split ? `<div class="list-item"><strong>Rozdělení dle osoby</strong><div style="margin-top:8px;">Viki: ${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)} · zbývá ${formatCurrency(split.vikiRemaining)}</div><div style="margin-top:6px;">Káťa: ${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)} · zbývá ${formatCurrency(split.kataRemaining)}</div></div>` : ''}
       </div>
       <div class="card" style="margin-top:12px;">
         <h4>Transakce</h4>
