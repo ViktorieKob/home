@@ -12,10 +12,17 @@ Aplikace je jednoduchá webová aplikace bez frameworku. Frontend běží static
 1. Stáhněte nebo naklonujte repozitář.
 2. V Supabase SQL editoru spusťte obsah souboru `supabase.sql`.
 3. Ověřte, že v `app.js` je správně vyplněné `SUPABASE_URL` a `SUPABASE_ANON_KEY`.
-4. Otevřete složku a spusťte jednoduchý lokální server, např.:
-   - `python3 -m http.server 8000`
-5. V prohlížeči otevřete `http://localhost:8000`.
+4. Nainstalujte závislosti:
+   - `npm install`
+5. Spusťte dev server (live reload):
+   - `npm run dev`
+6. V prohlížeči otevřete `http://localhost:5173`.
 6. Data se načítají a zapisují do Supabase.
+
+## Dev režim ve VS Code
+- Otevřete Command Palette a spusťte: `Tasks: Run Task`
+- Vyberte úlohu: `Dev server (live-server)`
+- Server poběží na adrese `http://localhost:5173`
 
 ## Spuštění přes GitHub Pages
 1. V GitHub repozitáři otevřete Settings → Pages.
