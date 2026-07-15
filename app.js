@@ -395,6 +395,73 @@ function calculatePeriodSummary(period) {
   return { incomes, expenses, openingBalance, balance, categoryBudgetTotal, rolloverTotal, manualAdjustmentTotal, availableTotal, spentTotal, remainingTotal, plannedTotal, freeCash };
 }
 
+function roundMoney(value) {
+  return Math.round(safeNumber(value) * 100) / 100;
+}
+
+async function syncPeriodBudgetRollovers() {
+  if (!state.periods.length || !state.categories.length) return;
+
+  const periodsAsc = [...state.periods].sort((a, b) => a.start_date.localeCompare(b.start_date));
+  const categories = state.categories.filter((category) => category.active !== false);
+  let hasChanges = false;
+
+  for (const period of periodsAsc) {
+    const previousPeriod = getPreviousPeriod(period);
+
+    for (const category of categories) {
+      const existing = getPeriodBudgetRecord(category.id, period.id);
+      const baseBudget = roundMoney(existing?.base_budget ?? computeTargetBudgetForCategory(category, period.id));
+      const manualAdjustment = roundMoney(existing?.manual_adjustment ?? 0);
+      const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
+      const rolloverAmount = roundMoney(previousMetrics?.remaining ?? 0);
+      const totalAvailable = roundMoney(baseBudget + manualAdjustment + rolloverAmount);
+
+      if (!existing?.id) {
+        await supabaseCall('POST', 'period_budgets', {}, {
+          period_id: period.id,
+          category_id: category.id,
+          base_budget: baseBudget,
+          rollover_amount: rolloverAmount,
+          manual_adjustment: manualAdjustment,
+          total_available: totalAvailable,
+        });
+        state.periodBudgets.push({
+          id: generateId(),
+          period_id: period.id,
+          category_id: category.id,
+          base_budget: baseBudget,
+          rollover_amount: rolloverAmount,
+          manual_adjustment: manualAdjustment,
+          total_available: totalAvailable,
+        });
+        hasChanges = true;
+        continue;
+      }
+
+      const storedRollover = roundMoney(existing.rollover_amount);
+      const storedTotal = roundMoney(existing.total_available);
+
+      if (Math.abs(storedRollover - rolloverAmount) > 0.009 || Math.abs(storedTotal - totalAvailable) > 0.009) {
+        await supabaseCall('PATCH', 'period_budgets', { id: `eq.${existing.id}` }, {
+          rollover_amount: rolloverAmount,
+          total_available: totalAvailable,
+        });
+        existing.rollover_amount = rolloverAmount;
+        existing.total_available = totalAvailable;
+        hasChanges = true;
+      }
+    }
+  }
+
+  if (hasChanges) {
+    const periodIds = state.periods.map((period) => period.id).join(',');
+    if (periodIds) {
+      state.periodBudgets = await supabaseCall('GET', 'period_budgets', { period_id: `in.(${periodIds})`, order: 'created_at.desc' });
+    }
+  }
+}
+
 async function ensureCurrentPeriodWithConfirmation() {
   const today = getToday();
   if (getPeriodByDate(today)) {
@@ -487,9 +554,9 @@ async function saveCategoryBudgetForCurrentPeriod(categoryId, baseBudget, manual
 
   try {
     const existing = getPeriodBudgetRecord(category.id, period.id);
-    const rolloverAmount = existing
-      ? safeNumber(existing.rollover_amount)
-      : safeNumber(computeCategoryMetrics(category, period).rolloverAmount);
+    const previousPeriod = getPreviousPeriod(period);
+    const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
+    const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
     const totalAvailable = safeNumber(baseBudget) + safeNumber(rolloverAmount) + safeNumber(manualAdjustment);
 
     if (existing?.id) {
@@ -801,6 +868,8 @@ async function loadAllData() {
       state.recurringTransactions = await supabaseCall('GET', 'recurring_transactions', { household_id: `eq.${householdId}`, order: 'created_at.desc' });
       state.transactions = await supabaseCall('GET', 'transactions', { household_id: `eq.${householdId}`, order: 'transaction_date.desc' });
     }
+
+    await syncPeriodBudgetRollovers();
 
     const todayPeriod = getPeriodByDate(getToday());
     if (todayPeriod?.id) {
