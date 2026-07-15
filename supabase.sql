@@ -178,6 +178,19 @@ drop policy if exists categories_public_update on categories;
 create policy categories_public_update on categories
   for update using (true) with check (true);
 
+drop policy if exists period_budgets_public_select on period_budgets;
+create policy period_budgets_public_select on period_budgets
+  for select using (true);
+drop policy if exists period_budgets_public_insert on period_budgets;
+create policy period_budgets_public_insert on period_budgets
+  for insert with check (true);
+drop policy if exists period_budgets_public_update on period_budgets;
+create policy period_budgets_public_update on period_budgets
+  for update using (true) with check (true);
+drop policy if exists period_budgets_public_delete on period_budgets;
+create policy period_budgets_public_delete on period_budgets
+  for delete using (true);
+
 drop policy if exists transactions_public_select on transactions;
 create policy transactions_public_select on transactions
   for select using (true);

@@ -145,6 +145,9 @@ function formatApiErrorMessage(error) {
   if (message.includes('PGRST204') || message.includes('Could not find the')) {
     return 'Nesoulad mezi app.js a databázovým schématem. Zkontrolujte sloupce v supabase.sql.';
   }
+  if (message.includes('period_budgets') && (message.includes('401') || message.includes('permission denied') || message.includes('42501'))) {
+    return 'Tabulka period_budgets není dostupná pro anon přístup. Spusťte aktualizované politiky ze souboru supabase.sql.';
+  }
   return message;
 }
 function getPeriodById(id) {
@@ -213,53 +216,61 @@ function calculatePeriodSummary(period) {
 async function createPeriodBudgetsForPeriod(period) {
   if (!period?.id) return;
 
-  const existingBudgets = await supabaseCall('GET', 'period_budgets', { period_id: `eq.${period.id}`, limit: 1 });
-  if (existingBudgets?.length) return;
+  try {
+    const existingBudgets = await supabaseCall('GET', 'period_budgets', { period_id: `eq.${period.id}`, limit: 1 });
+    if (existingBudgets?.length) return;
 
-  const previousPeriod = getPreviousPeriod(period);
-  const activeCategories = state.categories.filter((category) => category.active !== false);
-  if (!activeCategories.length) return;
+    const previousPeriod = getPreviousPeriod(period);
+    const activeCategories = state.categories.filter((category) => category.active !== false);
+    if (!activeCategories.length) return;
 
-  const budgetRows = activeCategories.map((category) => {
-    const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
-    const rolloverAmount = Math.max(safeNumber(previousMetrics?.remaining ?? 0), 0);
-    const baseBudget = safeNumber(category.default_budget);
-    const manualAdjustment = 0;
-    const totalAvailable = baseBudget + rolloverAmount + manualAdjustment;
+    const budgetRows = activeCategories.map((category) => {
+      const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
+      const rolloverAmount = Math.max(safeNumber(previousMetrics?.remaining ?? 0), 0);
+      const baseBudget = safeNumber(category.default_budget);
+      const manualAdjustment = 0;
+      const totalAvailable = baseBudget + rolloverAmount + manualAdjustment;
 
-    return {
-      period_id: period.id,
-      category_id: category.id,
-      base_budget: baseBudget,
-      rollover_amount: rolloverAmount,
-      manual_adjustment: manualAdjustment,
-      total_available: totalAvailable,
-    };
-  });
+      return {
+        period_id: period.id,
+        category_id: category.id,
+        base_budget: baseBudget,
+        rollover_amount: rolloverAmount,
+        manual_adjustment: manualAdjustment,
+        total_available: totalAvailable,
+      };
+    });
 
-  await supabaseCall('POST', 'period_budgets', {}, budgetRows);
+    await supabaseCall('POST', 'period_budgets', {}, budgetRows);
+  } catch (error) {
+    console.warn('Period budgets se nepodařilo vytvořit:', error);
+  }
 }
 
 async function createBudgetForCategoryInCurrentPeriod(category) {
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
   if (!period?.id || !category?.id) return;
 
-  const existing = getPeriodBudgetRecord(category.id, period.id);
-  if (existing) return;
+  try {
+    const existing = getPeriodBudgetRecord(category.id, period.id);
+    if (existing) return;
 
-  const previousPeriod = getPreviousPeriod(period);
-  const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
-  const rolloverAmount = Math.max(safeNumber(previousMetrics?.remaining ?? 0), 0);
-  const baseBudget = safeNumber(category.default_budget);
+    const previousPeriod = getPreviousPeriod(period);
+    const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
+    const rolloverAmount = Math.max(safeNumber(previousMetrics?.remaining ?? 0), 0);
+    const baseBudget = safeNumber(category.default_budget);
 
-  await supabaseCall('POST', 'period_budgets', {}, {
-    period_id: period.id,
-    category_id: category.id,
-    base_budget: baseBudget,
-    rollover_amount: rolloverAmount,
-    manual_adjustment: 0,
-    total_available: baseBudget + rolloverAmount,
-  });
+    await supabaseCall('POST', 'period_budgets', {}, {
+      period_id: period.id,
+      category_id: category.id,
+      base_budget: baseBudget,
+      rollover_amount: rolloverAmount,
+      manual_adjustment: 0,
+      total_available: baseBudget + rolloverAmount,
+    });
+  } catch (error) {
+    console.warn('Rozpočet kategorie pro období se nepodařilo vytvořit:', error);
+  }
 }
 
 // Supabase API calls using fetch
@@ -332,13 +343,19 @@ async function loadAllData() {
   render();
   try {
     await ensureDefaultHousehold();
-    const [households, periods, categories, periodBudgets, transactions] = await Promise.all([
+    const [households, periods, categories, transactions] = await Promise.all([
       supabaseCall('GET', 'households', { limit: 1 }),
       supabaseCall('GET', 'budget_periods', { order: 'start_date.desc' }),
       supabaseCall('GET', 'categories', { order: 'name.asc' }),
-      supabaseCall('GET', 'period_budgets', { order: 'created_at.desc' }),
       supabaseCall('GET', 'transactions', { order: 'transaction_date.desc' }),
     ]);
+
+    let periodBudgets = [];
+    try {
+      periodBudgets = await supabaseCall('GET', 'period_budgets', { order: 'created_at.desc' });
+    } catch (error) {
+      console.warn('Period budgets nejsou dostupné:', error);
+    }
     
     if (households?.length) {
       state.household = households[0];
