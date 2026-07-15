@@ -1721,7 +1721,11 @@ function closeModal() {
 // Render functions
 function renderDashboard() {
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
-  const previousPeriod = state.periods.find((p) => p.id !== period?.id) || null;
+  const sortedPeriods = getPeriodsChronologically();
+  const periodIndex = sortedPeriods.findIndex((item) => item.id === period?.id);
+  const periodPrev = periodIndex > 0 ? sortedPeriods[periodIndex - 1] : null;
+  const periodNext = periodIndex >= 0 && periodIndex < sortedPeriods.length - 1 ? sortedPeriods[periodIndex + 1] : null;
+  const previousPeriod = periodPrev || state.periods.find((p) => p.id !== period?.id) || null;
   const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0,plannedTotal:0,freeCash:0,unbudgetedExpenses:0 };
   const vikiIncome = period
     ? state.transactions
@@ -1781,12 +1785,19 @@ function renderDashboard() {
   return `
     <div class="container">
       <div class="card">
+        <div class="quick-action-row">
+          <button class="btn btn-primary quick-action-main" data-action="show-add-transaction">+ Transakce</button>
+        </div>
         <div class="row" style="justify-content: space-between; align-items: center;">
           <div>
-            <h2>Dashboard</h2>
+            <h2>Období</h2>
             <p>${period ? `${period.name} · ${period.start_date} → ${period.end_date}` : 'Žádné období'}</p>
           </div>
           <div class="row">
+            <div class="row period-switch-row" style="gap:8px;">
+              <button class="btn btn-secondary" data-action="period-prev" ${periodPrev ? '' : 'disabled'}>←</button>
+              <button class="btn btn-secondary" data-action="period-next" ${periodNext ? '' : 'disabled'}>→</button>
+            </div>
             <select id="period-select">
               ${state.periods.map((p) => `<option value="${p.id}" ${p.id === period?.id ? 'selected' : ''}>${p.name}</option>`).join('')}
             </select>
@@ -2139,6 +2150,22 @@ function attachEvents() {
   }));
   document.querySelectorAll('[data-action="open-expense-bucket"]').forEach((btn) => btn.addEventListener('click', () => {
     showExpenseBucketModal(btn.dataset.level, btn.dataset.key, btn.dataset.periodId);
+  }));
+  document.querySelectorAll('[data-action="period-prev"]').forEach((btn) => btn.addEventListener('click', () => {
+    const sorted = getPeriodsChronologically();
+    const currentIndex = sorted.findIndex((item) => item.id === state.currentPeriodId);
+    if (currentIndex > 0) {
+      state.currentPeriodId = sorted[currentIndex - 1].id;
+      render();
+    }
+  }));
+  document.querySelectorAll('[data-action="period-next"]').forEach((btn) => btn.addEventListener('click', () => {
+    const sorted = getPeriodsChronologically();
+    const currentIndex = sorted.findIndex((item) => item.id === state.currentPeriodId);
+    if (currentIndex >= 0 && currentIndex < sorted.length - 1) {
+      state.currentPeriodId = sorted[currentIndex + 1].id;
+      render();
+    }
   }));
   document.getElementById('period-select')?.addEventListener('change', (event) => {
     state.currentPeriodId = event.target.value;

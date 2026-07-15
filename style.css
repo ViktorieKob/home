@@ -230,6 +230,16 @@ textarea { min-height: 90px; resize: vertical; }
 }
 .mini-chart-value { text-align: right; color: var(--muted); font-weight: 600; }
 
+.quick-action-row {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: 14px;
+}
+
+.quick-action-main {
+  min-width: 160px;
+}
+
 .chart-toolbar {
   display: flex;
   gap: 8px;
@@ -338,13 +348,24 @@ select {
 }
 @media (max-width: 900px) {
   .app-shell { flex-direction: column; }
-  .sidebar { width: 100%; }
+  .sidebar { display: none; }
+  .topbar { display: none; }
   .stat-grid { grid-template-columns: 1fr 1fr; }
   .grid-3 { grid-template-columns: 1fr; }
   .grid-2 { grid-template-columns: 1fr; }
   .mobile-nav { display: flex; }
-  .topbar { padding: 14px 16px; }
-  .content { padding: 16px; }
+  .content { padding: 12px 12px 76px; }
+  .quick-action-row {
+    margin-bottom: 12px;
+  }
+  .quick-action-main {
+    width: 100%;
+    min-width: 0;
+  }
+  .period-switch-row {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 @media (max-width: 600px) {
   .stat-grid, .grid-2 { grid-template-columns: 1fr; }
