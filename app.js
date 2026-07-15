@@ -659,7 +659,6 @@ function getAccountEnvelopeGroups(period) {
   const groups = {
     viki: { id: 'viki', title: 'Účet Viki', icon: '🟦', rows: [], available: 0, spent: 0, remaining: 0 },
     kata: { id: 'kata', title: 'Účet Káťa', icon: '🟩', rows: [], available: 0, spent: 0, remaining: 0 },
-    shared: { id: 'shared', title: 'Společné', icon: '🟨', rows: [], available: 0, spent: 0, remaining: 0 },
   };
 
   if (!period?.id) return groups;
@@ -669,29 +668,90 @@ function getAccountEnvelopeGroups(period) {
     .forEach((category) => {
       const metrics = computeCategoryMetrics(category, period);
       const split = computeCategoryPersonSplit(category, period.id, metrics.totalAvailable);
+
+      if (split) {
+        const vikiRow = {
+          category,
+          metrics,
+          split,
+          person: 'Viki',
+          available: safeNumber(split.vikiBudget),
+          spent: safeNumber(split.vikiSpent),
+          remaining: safeNumber(split.vikiRemaining),
+          rollover: safeNumber(split.rolloverVikiAmount),
+        };
+        const kataRow = {
+          category,
+          metrics,
+          split,
+          person: 'Káťa',
+          available: safeNumber(split.kataBudget),
+          spent: safeNumber(split.kataSpent),
+          remaining: safeNumber(split.kataRemaining),
+          rollover: safeNumber(split.rolloverKataAmount),
+        };
+
+        groups.viki.rows.push(vikiRow);
+        groups.kata.rows.push(kataRow);
+        groups.viki.available += vikiRow.available;
+        groups.viki.spent += vikiRow.spent;
+        groups.viki.remaining += vikiRow.remaining;
+        groups.kata.available += kataRow.available;
+        groups.kata.spent += kataRow.spent;
+        groups.kata.remaining += kataRow.remaining;
+        return;
+      }
+
       const groupId = getCategoryAccountGroup(category);
+      if (groupId !== 'viki' && groupId !== 'kata') {
+        return;
+      }
+
       const row = {
         category,
         metrics,
         split,
+        person: null,
+        available: safeNumber(metrics.totalAvailable),
+        spent: safeNumber(metrics.expenses),
+        remaining: safeNumber(metrics.remaining),
+        rollover: safeNumber(metrics.rolloverAmount),
       };
 
       groups[groupId].rows.push(row);
-      groups[groupId].available += safeNumber(metrics.totalAvailable);
-      groups[groupId].spent += safeNumber(metrics.expenses);
-      groups[groupId].remaining += safeNumber(metrics.remaining);
+      groups[groupId].available += row.available;
+      groups[groupId].spent += row.spent;
+      groups[groupId].remaining += row.remaining;
     });
 
-  Object.values(groups).forEach((group) => {
-    group.rows.sort((a, b) => safeNumber(b.metrics.totalAvailable) - safeNumber(a.metrics.totalAvailable));
+  [groups.viki, groups.kata].forEach((group) => {
+    group.rows.sort((a, b) => safeNumber(b.available) - safeNumber(a.available));
   });
 
   return groups;
 }
 
+function getPotravinySummary(period) {
+  if (!period?.id) return null;
+  const potravinyCategory = state.categories.find((category) =>
+    category.active !== false
+    && category.type === 'expense'
+    && normalizeLabel(category.name).includes('potraviny'));
+  if (!potravinyCategory) return null;
+
+  const metrics = computeCategoryMetrics(potravinyCategory, period);
+  return {
+    category: potravinyCategory,
+    available: safeNumber(metrics.totalAvailable),
+    spent: safeNumber(metrics.expenses),
+    remaining: safeNumber(metrics.remaining),
+  };
+}
+
 function renderAccountEnvelopeGroups(period) {
   const groups = getAccountEnvelopeGroups(period);
-  const ordered = [groups.viki, groups.kata, groups.shared];
+  const ordered = [groups.viki, groups.kata];
+  const potravinySummary = getPotravinySummary(period);
 
   return `
     <div class="account-groups-grid">
@@ -704,16 +764,15 @@ function renderAccountEnvelopeGroups(period) {
           <div class="account-group-meta">Rozpočty ${formatCurrency(group.available)} · Vyčerpáno ${formatCurrency(group.spent)}</div>
           <div class="account-group-list">
             ${group.rows.length ? group.rows.map((row) => {
-              const usage = Math.min(100, Math.max(0, safeNumber(row.metrics.usagePercent)));
+              const usage = row.available > 0 ? Math.min(100, Math.max(0, (row.spent / row.available) * 100)) : 0;
               return `
                 <button class="account-envelope-item" type="button" data-category-id="${row.category.id}">
                   <div class="account-envelope-header">
-                    <strong>${row.category.icon || '📦'} ${row.category.name}</strong>
-                    <span>${formatCurrency(row.metrics.remaining)}</span>
+                    <strong>${row.category.icon || '📦'} ${row.category.name}${row.person ? ` · ${row.person}` : ''}</strong>
+                    <span>${formatCurrency(row.remaining)}</span>
                   </div>
                   <div class="account-envelope-track"><span style="width:${usage}%"></span></div>
-                  <div class="account-envelope-meta">${formatCurrency(row.metrics.expenses)} / ${formatCurrency(row.metrics.totalAvailable)}</div>
-                  ${row.split ? `<div class="account-envelope-split">Viki ${formatCurrency(row.split.vikiRemaining)} · Káťa ${formatCurrency(row.split.kataRemaining)}</div>` : ''}
+                  <div class="account-envelope-meta">${formatCurrency(row.spent)} / ${formatCurrency(row.available)} · Převod ${formatCurrency(row.rollover)}</div>
                 </button>
               `;
             }).join('') : '<div class="empty">Žádné rozpočty ve skupině</div>'}
@@ -721,6 +780,13 @@ function renderAccountEnvelopeGroups(period) {
         </div>
       `).join('')}
     </div>
+    ${potravinySummary ? `
+      <div class="potraviny-total-card">
+        <strong>🛒 Potraviny celkem</strong>
+        <span>Zbývá ${formatCurrency(potravinySummary.remaining)}</span>
+        <small>${formatCurrency(potravinySummary.spent)} / ${formatCurrency(potravinySummary.available)}</small>
+      </div>
+    ` : ''}
   `;
 }
 

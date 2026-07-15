@@ -303,7 +303,7 @@ textarea { min-height: 90px; resize: vertical; }
 
 .account-groups-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin-top: 12px;
 }
@@ -402,6 +402,25 @@ textarea { min-height: 90px; resize: vertical; }
   color: var(--text);
   font-size: 0.78rem;
   margin-top: 4px;
+}
+
+.potraviny-total-card {
+  margin-top: 12px;
+  border: 1px solid rgba(255, 211, 114, 0.38);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(53, 45, 18, 0.46), rgba(44, 35, 15, 0.35));
+  display: grid;
+  gap: 4px;
+}
+
+.potraviny-total-card span {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.potraviny-total-card small {
+  color: var(--muted);
 }
 
 .budget-compare {
