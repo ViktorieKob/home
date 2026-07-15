@@ -203,24 +203,47 @@ function getPeriodBudgetRecord(categoryId, periodId) {
 function getCurrentPeriod() {
   return getPeriodById(state.currentPeriodId) || state.periods[0] || null;
 }
+function getPeriodsChronologically() {
+  return [...state.periods].sort((a, b) => {
+    const startCmp = String(a.start_date).localeCompare(String(b.start_date));
+    if (startCmp !== 0) return startCmp;
+    const endCmp = String(a.end_date).localeCompare(String(b.end_date));
+    if (endCmp !== 0) return endCmp;
+    return String(a.created_at || '').localeCompare(String(b.created_at || ''));
+  });
+}
 function getPreviousPeriod(period) {
   if (!period) return null;
-  const previousPeriods = state.periods
+  const strictPrevious = state.periods
     .filter((candidate) => candidate.id !== period.id && candidate.end_date < period.start_date)
     .sort((a, b) => b.end_date.localeCompare(a.end_date));
-  return previousPeriods[0] || null;
+  if (strictPrevious[0]) {
+    return strictPrevious[0];
+  }
+
+  const sorted = getPeriodsChronologically();
+  const currentIndex = sorted.findIndex((item) => item.id === period.id);
+  if (currentIndex <= 0) return null;
+  return sorted[currentIndex - 1] || null;
 }
 function getPeriodForDate(dateValue) {
-  const targetDate = new Date(dateValue);
-  const matchingPeriod = state.periods.find((period) => {
-    const start = new Date(period.start_date);
-    const end = new Date(period.end_date);
-    return targetDate >= start && targetDate <= end;
-  });
-  return matchingPeriod?.id || state.currentPeriodId || state.periods[0]?.id || null;
+  const matchingPeriod = getPeriodByDate(dateValue);
+  return matchingPeriod?.id || null;
 }
 function getPeriodByDate(dateValue) {
-  return state.periods.find((period) => dateValue >= period.start_date && dateValue <= period.end_date) || null;
+  const matches = state.periods.filter((period) => dateValue >= period.start_date && dateValue <= period.end_date);
+  if (!matches.length) return null;
+  return matches.sort((a, b) => {
+    const startCmp = String(b.start_date).localeCompare(String(a.start_date));
+    if (startCmp !== 0) return startCmp;
+    return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+  })[0] || null;
+}
+function hasOverlappingPeriod(startDate, endDate, excludedPeriodId = null) {
+  return state.periods.some((period) => {
+    if (excludedPeriodId && period.id === excludedPeriodId) return false;
+    return !(endDate < period.start_date || startDate > period.end_date);
+  });
 }
 function getConfirmedSalariesTotal(periodId) {
   if (!hasBothSalariesInPeriod(periodId)) {
@@ -459,6 +482,20 @@ async function syncPeriodBudgetRollovers() {
     if (periodIds) {
       state.periodBudgets = await supabaseCall('GET', 'period_budgets', { period_id: `in.(${periodIds})`, order: 'created_at.desc' });
     }
+  }
+}
+
+async function syncTransactionPeriodsByDate() {
+  if (!state.transactions.length) return;
+
+  for (const transaction of state.transactions) {
+    const mappedPeriodId = getPeriodForDate(transaction.transaction_date);
+    if (!mappedPeriodId || mappedPeriodId === transaction.period_id) continue;
+
+    await supabaseCall('PATCH', 'transactions', { id: `eq.${transaction.id}` }, {
+      period_id: mappedPeriodId,
+    });
+    transaction.period_id = mappedPeriodId;
   }
 }
 
@@ -869,6 +906,8 @@ async function loadAllData() {
       state.transactions = await supabaseCall('GET', 'transactions', { household_id: `eq.${householdId}`, order: 'transaction_date.desc' });
     }
 
+    await syncTransactionPeriodsByDate();
+    state.transactions = await supabaseCall('GET', 'transactions', { household_id: `eq.${householdId}`, order: 'transaction_date.desc' });
     await syncPeriodBudgetRollovers();
 
     const todayPeriod = getPeriodByDate(getToday());
@@ -892,10 +931,18 @@ async function loadAllData() {
 async function insertTransaction(formData, options = {}) {
   state.loading = true;
   render();
+
+  const mappedPeriodId = getPeriodForDate(formData.transaction_date);
+  if (!mappedPeriodId) {
+    state.status = { type: 'error', message: `Pro datum ${formData.transaction_date} neexistuje období. Nejdřív vytvoř období, do kterého datum spadá.` };
+    state.loading = false;
+    render();
+    return;
+  }
   
   const payload = {
     household_id: state.household.id,
-    period_id: getPeriodForDate(formData.transaction_date),
+    period_id: mappedPeriodId,
     type: formData.type,
     amount: Number(formData.amount),
     category_id: formData.category_id || null,
@@ -937,10 +984,18 @@ async function insertTransaction(formData, options = {}) {
 async function updateTransaction(id, payload) {
   state.loading = true;
   render();
+
+  const mappedPeriodId = getPeriodForDate(payload.transaction_date);
+  if (!mappedPeriodId) {
+    state.status = { type: 'error', message: `Pro datum ${payload.transaction_date} neexistuje období. Nejdřív vytvoř období, do kterého datum spadá.` };
+    state.loading = false;
+    render();
+    return;
+  }
   
   const nextPayload = {
     ...payload,
-    period_id: getPeriodForDate(payload.transaction_date),
+    period_id: mappedPeriodId,
     amount: Number(payload.amount),
     category_id: payload.category_id || null,
     subcategory_id: payload.type === 'expense' ? (payload.subcategory_id || null) : null,
@@ -2228,6 +2283,11 @@ function showPeriodModal(periodId = null) {
     }
     if (!payload.start_date || !payload.end_date || payload.start_date > payload.end_date) {
       state.status = { type: 'error', message: 'Datum začátku musí být menší nebo rovno datu konce.' };
+      render();
+      return;
+    }
+    if (hasOverlappingPeriod(payload.start_date, payload.end_date, period?.id || null)) {
+      state.status = { type: 'error', message: 'Toto období se překrývá s jiným obdobím. Uprav datum, aby se období nepřekrývala.' };
       render();
       return;
     }
