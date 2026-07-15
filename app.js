@@ -15,6 +15,29 @@ let state = {
 
 const appRoot = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
+const PRESET_CATEGORY_NAMES = ['Nájem', 'Potraviny', 'Pohonné hmoty', 'Drogerie', 'Psi', 'Splátky', 'Pojištění', 'Osobní'];
+const PRESET_CATEGORY_ICONS = [
+  { value: '🏠', label: 'Domov' },
+  { value: '🛒', label: 'Nákup' },
+  { value: '⛽', label: 'Auto' },
+  { value: '🧴', label: 'Drogerie' },
+  { value: '🐶', label: 'Mazlíčci' },
+  { value: '💳', label: 'Splátky' },
+  { value: '🛡️', label: 'Pojištění' },
+  { value: '👤', label: 'Osobní' },
+  { value: '📦', label: 'Ostatní' },
+];
+const CATEGORY_ICON_BY_NAME = {
+  'Nájem': '🏠',
+  'Potraviny': '🛒',
+  'Pohonné hmoty': '⛽',
+  'Drogerie': '🧴',
+  'Psi': '🐶',
+  'Splátky': '💳',
+  'Pojištění': '🛡️',
+  'Osobní': '👤',
+};
+const CZECH_MONTH_NAMES = ['Leden', 'Únor', 'Březen', 'Duben', 'Květen', 'Červen', 'Červenec', 'Srpen', 'Září', 'Říjen', 'Listopad', 'Prosinec'];
 
 // Helper functions
 function formatCurrency(value) {
@@ -29,6 +52,80 @@ function formatPercent(value) {
 function safeNumber(value) {
   const n = Number(value ?? 0);
   return Number.isFinite(n) ? n : 0;
+}
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+function createUtcDate(year, monthIndex, day) {
+  return new Date(Date.UTC(year, monthIndex, day));
+}
+function parseDateOnly(value) {
+  if (!value) return null;
+  const [year, month, day] = String(value).split('-').map((part) => Number(part));
+  if (!year || !month || !day) return null;
+  return createUtcDate(year, month - 1, day);
+}
+function formatDateOnly(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+function addDaysUtc(date, days) {
+  const nextDate = new Date(date.getTime());
+  nextDate.setUTCDate(nextDate.getUTCDate() + days);
+  return nextDate;
+}
+function getDaysInMonth(year, monthIndex) {
+  return createUtcDate(year, monthIndex + 1, 0).getUTCDate();
+}
+function createPeriodStartDate(year, monthIndex, startDay) {
+  const day = Math.min(startDay, getDaysInMonth(year, monthIndex));
+  return createUtcDate(year, monthIndex, day);
+}
+function getBudgetStartDay() {
+  const rawDay = Number(state.household?.budget_start_day ?? 1);
+  return clamp(Number.isFinite(rawDay) ? rawDay : 1, 1, 31);
+}
+function getLatestPeriodEndDate() {
+  if (!state.periods.length) return null;
+  const latestPeriod = state.periods.reduce((latest, period) => {
+    if (!latest) return period;
+    return period.end_date > latest.end_date ? period : latest;
+  }, null);
+  return parseDateOnly(latestPeriod?.end_date);
+}
+function getNextMonthlyPeriodPayload() {
+  const startDay = getBudgetStartDay();
+  const baseDate = getLatestPeriodEndDate() ? addDaysUtc(getLatestPeriodEndDate(), 1) : parseDateOnly(getToday());
+  const year = baseDate.getUTCFullYear();
+  const monthIndex = baseDate.getUTCMonth();
+  const thisMonthStart = createPeriodStartDate(year, monthIndex, startDay);
+
+  let periodStart = thisMonthStart;
+  if (baseDate < thisMonthStart) {
+    periodStart = createPeriodStartDate(year, monthIndex - 1, startDay);
+  }
+
+  const nextPeriodStart = createPeriodStartDate(periodStart.getUTCFullYear(), periodStart.getUTCMonth() + 1, startDay);
+  const periodEnd = addDaysUtc(nextPeriodStart, -1);
+  const periodName = `${CZECH_MONTH_NAMES[periodStart.getUTCMonth()]} ${periodStart.getUTCFullYear()}`;
+
+  return {
+    name: periodName,
+    start_date: formatDateOnly(periodStart),
+    end_date: formatDateOnly(periodEnd),
+    status: 'active',
+  };
+}
+function getCategoryNameOptions(selectedName = '') {
+  const names = PRESET_CATEGORY_NAMES.includes(selectedName) || !selectedName ? PRESET_CATEGORY_NAMES : [selectedName, ...PRESET_CATEGORY_NAMES];
+  return names.map((name) => `<option value="${name}" ${name === selectedName ? 'selected' : ''}>${name}</option>`).join('');
+}
+function getCategoryIconOptions(selectedIcon = '') {
+  const hasSelected = PRESET_CATEGORY_ICONS.some((icon) => icon.value === selectedIcon);
+  const options = hasSelected || !selectedIcon ? PRESET_CATEGORY_ICONS : [{ value: selectedIcon, label: 'Vlastní' }, ...PRESET_CATEGORY_ICONS];
+  return options.map((icon) => `<option value="${icon.value}" ${icon.value === selectedIcon ? 'selected' : ''}>${icon.value} ${icon.label}</option>`).join('');
 }
 function getToday() {
   return new Date().toISOString().slice(0, 10);
@@ -331,6 +428,28 @@ async function updatePeriod(id, payload) {
   }
 }
 
+async function updateBudgetStartDay(startDay) {
+  if (!state.household?.id) {
+    state.status = { type: 'error', message: 'Nejdřív je potřeba vytvořit domácnost.' };
+    render();
+    return;
+  }
+
+  state.loading = true;
+  render();
+
+  try {
+    await supabaseCall('PATCH', 'households', { id: `eq.${state.household.id}` }, { budget_start_day: startDay });
+    state.household.budget_start_day = startDay;
+    state.status = { type: 'success', message: 'Nastavení dne začátku období bylo uloženo.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
 // UI functions
 function setView(view) {
   currentView = view;
@@ -451,11 +570,12 @@ function renderHistory() {
 }
 
 function renderBudgetManagement() {
-  return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat kategorii</button></div><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => `<div class="list-item"><strong>${category.name}</strong><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button></div></div>`).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
+  return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat kategorii</button></div><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button></div></div>`).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
 }
 
 function renderPeriods() {
-  return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa období</h2><button class="btn btn-primary" data-action="show-create-period">Nové období</button></div><div class="list" style="margin-top:12px;">${state.periods.length ? state.periods.map((period) => `<div class="list-item"><strong>${period.name}</strong><div style="color:var(--muted); margin-top:6px;">${period.start_date} → ${period.end_date}</div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-period" data-id="${period.id}">Upravit</button></div></div>`).join('') : '<div class="empty">Žádná období</div>'}</div></div></div>`;
+  const nextPeriod = getNextMonthlyPeriodPayload();
+  return `<div class="container"><div class="card"><h2>Nastavení období</h2><form id="period-start-day-form" class="row" style="margin-top:12px; gap:12px; align-items:end;"><label style="max-width:240px;">Začátek rozpočtového měsíce (1-31)<input id="budget-start-day" name="budget_start_day" type="number" min="1" max="31" required value="${getBudgetStartDay()}"></label><button class="btn btn-secondary" type="submit">Uložit den</button></form><p style="color:var(--muted); margin-top:10px;">Další období se bude tvořit automaticky od zvoleného dne.</p></div><div class="card" style="margin-top:16px;"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa období</h2><button class="btn btn-primary" data-action="show-create-period">Vytvořit další měsíc</button></div><div class="list" style="margin-top:12px;"><div class="list-item"><strong>Následující období</strong><div style="color:var(--muted); margin-top:6px;">${nextPeriod.name} · ${nextPeriod.start_date} → ${nextPeriod.end_date}</div></div>${state.periods.length ? state.periods.map((period) => `<div class="list-item"><strong>${period.name}</strong><div style="color:var(--muted); margin-top:6px;">${period.start_date} → ${period.end_date}</div></div>`).join('') : '<div class="empty">Žádná období</div>'}</div></div></div>`;
 }
 
 function renderSidebar() {
@@ -540,7 +660,16 @@ function attachEvents() {
     if (!category) return;
     updateCategory(category.id, { active: category.active === false ? true : false });
   }));
-  document.querySelectorAll('[data-action="edit-period"]').forEach((btn) => btn.addEventListener('click', () => showPeriodModal(btn.dataset.id)));
+  document.getElementById('period-start-day-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const nextStartDay = Number(document.getElementById('budget-start-day')?.value);
+    if (!Number.isInteger(nextStartDay) || nextStartDay < 1 || nextStartDay > 31) {
+      state.status = { type: 'error', message: 'Den začátku období musí být číslo od 1 do 31.' };
+      render();
+      return;
+    }
+    updateBudgetStartDay(nextStartDay);
+  });
 }
 
 function showTransactionModal(transactionId = null) {
@@ -592,6 +721,8 @@ function showTransactionModal(transactionId = null) {
 
 function showCategoryModal(categoryId = null) {
   const category = state.categories.find((c) => c.id === categoryId) || null;
+  const selectedName = category?.name || PRESET_CATEGORY_NAMES[0];
+  const selectedIcon = category?.icon || CATEGORY_ICON_BY_NAME[selectedName] || '📦';
   const form = `
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
@@ -599,14 +730,27 @@ function showCategoryModal(categoryId = null) {
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <form id="category-form" class="form-grid" style="margin-top:12px;">
-        <label>Název<input name="name" required value="${category?.name || ''}"></label>
-        <label>Ikona<input name="icon" value="${category?.icon || '📦'}"></label>
+        <label>Název<select name="name" id="category-name" required>${getCategoryNameOptions(selectedName)}</select></label>
+        <label>Ikona<select name="icon" id="category-icon">${getCategoryIconOptions(selectedIcon)}</select></label>
         <label>Výchozí rozpočet<input name="default_budget" type="number" step="0.01" value="${category?.default_budget || 0}"></label>
         <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${category ? 'Uložit' : 'Přidat'}</button>
       </form>
     </div>`;
   showModal(form);
   document.getElementById('close-modal').addEventListener('click', closeModal);
+  const nameSelect = document.getElementById('category-name');
+  const iconSelect = document.getElementById('category-icon');
+  let iconWasChanged = false;
+  iconSelect?.addEventListener('change', () => {
+    iconWasChanged = true;
+  });
+  nameSelect?.addEventListener('change', (event) => {
+    if (iconWasChanged || category) return;
+    const suggestedIcon = CATEGORY_ICON_BY_NAME[event.target.value];
+    if (suggestedIcon && iconSelect) {
+      iconSelect.value = suggestedIcon;
+    }
+  });
   document.getElementById('category-form').addEventListener('submit', (event) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
@@ -625,33 +769,27 @@ function showCategoryModal(categoryId = null) {
   });
 }
 
-function showPeriodModal(periodId = null) {
-  const period = state.periods.find((p) => p.id === periodId) || null;
+function showPeriodModal() {
+  const nextPeriod = getNextMonthlyPeriodPayload();
   const form = `
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
-        <h3>${period ? 'Upravit období' : 'Nové období'}</h3>
+        <h3>Nové období</h3>
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <form id="period-form" class="form-grid" style="margin-top:12px;">
-        <label>Název<input name="name" required value="${period?.name || ''}"></label>
-        <label>Začátek<input name="start_date" type="date" required value="${period?.start_date || getToday()}"></label>
-        <label>Konec<input name="end_date" type="date" required value="${period?.end_date || getToday()}"></label>
-        <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${period ? 'Uložit' : 'Vytvořit'}</button>
+        <label>Název<input name="name" required readonly value="${nextPeriod.name}"></label>
+        <label>Začátek<input name="start_date" type="date" required readonly value="${nextPeriod.start_date}"></label>
+        <label>Konec<input name="end_date" type="date" required readonly value="${nextPeriod.end_date}"></label>
+        <p style="color:var(--muted); margin:0;">Období se počítá automaticky podle nastaveného dne začátku měsíce.</p>
+        <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>Vytvořit</button>
       </form>
     </div>`;
   showModal(form);
   document.getElementById('close-modal').addEventListener('click', closeModal);
   document.getElementById('period-form').addEventListener('submit', (event) => {
     event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const payload = Object.fromEntries(formData.entries());
-    payload.status = 'active';
-    if (period) {
-      updatePeriod(period.id, payload);
-    } else {
-      createPeriod(payload);
-    }
+    createPeriod(nextPeriod);
     closeModal();
   });
 }
