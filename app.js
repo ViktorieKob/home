@@ -256,6 +256,196 @@ function buildTransferSummary() {
   return { kataItems, vikiItems, kataPlanTotal, vikiSidePlanTotal };
 }
 
+function isInternalTransferTransaction(transaction) {
+  if (!transaction || transaction.type !== 'expense') return false;
+  const text = normalizeLabel(transaction.note || '');
+  const kataTag = normalizeLabel(TRANSFER_NOTE_TAGS.kata);
+  const vikiSideTag = normalizeLabel(TRANSFER_NOTE_TAGS.vikiSide);
+  return text.includes(kataTag) || text.includes(vikiSideTag);
+}
+
+function splitSharedExpenseByPayer(transaction) {
+  const amount = safeNumber(transaction.amount);
+  if (transaction.paid_by === 'Viki') return { viki: amount, kata: 0 };
+  if (transaction.paid_by === 'Káťa') return { viki: 0, kata: amount };
+  return { viki: amount / 2, kata: amount / 2 };
+}
+
+function computeAssignedFromIncomeSplit(category, metrics) {
+  const splitMode = category?.split_mode || (category?.split_by_person ? 'half' : 'none');
+  const baseBudget = safeNumber(metrics?.baseBudget);
+  const manualAdjustment = safeNumber(metrics?.manualAdjustment);
+
+  let vikiBase = baseBudget / 2;
+  let kataBase = baseBudget / 2;
+  if (splitMode === 'custom') {
+    vikiBase = safeNumber(category.split_viki_amount);
+    kataBase = safeNumber(category.split_kata_amount);
+  }
+
+  const positiveViki = Math.max(vikiBase, 0);
+  const positiveKata = Math.max(kataBase, 0);
+  const totalPositive = positiveViki + positiveKata;
+  const vikiRatio = totalPositive > 0 ? (positiveViki / totalPositive) : 0.5;
+  const vikiManual = manualAdjustment * vikiRatio;
+  const kataManual = manualAdjustment - vikiManual;
+
+  return {
+    viki: vikiBase + vikiManual,
+    kata: kataBase + kataManual,
+  };
+}
+
+function getPersonBudgetResponsibility(period) {
+  const result = {
+    viki: { assignedFromIncome: 0, available: 0, spent: 0, remaining: 0, categories: [] },
+    kata: { assignedFromIncome: 0, available: 0, spent: 0, remaining: 0, categories: [] },
+    combined: [],
+  };
+  if (!period?.id) return result;
+
+  const expenseCategories = state.categories.filter((category) => category.active !== false && category.type === 'expense');
+
+  expenseCategories.forEach((category) => {
+    const metrics = computeCategoryMetrics(category, period);
+    const split = computeCategoryPersonSplit(category, period.id, metrics.totalAvailable);
+
+    let vikiBudget = 0;
+    let kataBudget = 0;
+    let vikiSpent = 0;
+    let kataSpent = 0;
+    let vikiAssigned = 0;
+    let kataAssigned = 0;
+
+    if (split) {
+      vikiBudget = safeNumber(split.vikiBudget);
+      kataBudget = safeNumber(split.kataBudget);
+      vikiSpent = safeNumber(split.vikiSpent);
+      kataSpent = safeNumber(split.kataSpent);
+      const assigned = computeAssignedFromIncomeSplit(category, metrics);
+      vikiAssigned = safeNumber(assigned.viki);
+      kataAssigned = safeNumber(assigned.kata);
+    } else {
+      const owner = getCategoryAccountGroup(category);
+      const categoryTransactions = state.transactions
+        .filter((transaction) => transaction.period_id === period.id && transaction.category_id === category.id && transaction.type === 'expense')
+        .filter((transaction) => !isInternalTransferTransaction(transaction));
+      const spentByPayer = categoryTransactions.reduce((acc, transaction) => {
+        const splitSpend = splitSharedExpenseByPayer(transaction);
+        acc.viki += splitSpend.viki;
+        acc.kata += splitSpend.kata;
+        return acc;
+      }, { viki: 0, kata: 0 });
+
+      const available = safeNumber(metrics.totalAvailable);
+      const assigned = safeNumber(metrics.baseBudget) + safeNumber(metrics.manualAdjustment);
+      if (owner === 'viki') {
+        vikiBudget = available;
+        vikiAssigned = assigned;
+      } else if (owner === 'kata') {
+        kataBudget = available;
+        kataAssigned = assigned;
+      } else {
+        vikiBudget = available / 2;
+        kataBudget = available / 2;
+        vikiAssigned = assigned / 2;
+        kataAssigned = assigned / 2;
+      }
+
+      vikiSpent = safeNumber(spentByPayer.viki);
+      kataSpent = safeNumber(spentByPayer.kata);
+    }
+
+    const vikiRemaining = vikiBudget - vikiSpent;
+    const kataRemaining = kataBudget - kataSpent;
+
+    const combinedRow = {
+      category,
+      vikiBudget,
+      kataBudget,
+      totalBudget: vikiBudget + kataBudget,
+      vikiSpent,
+      kataSpent,
+      totalSpent: vikiSpent + kataSpent,
+      remaining: vikiRemaining + kataRemaining,
+    };
+
+    result.viki.assignedFromIncome += vikiAssigned;
+    result.viki.available += vikiBudget;
+    result.viki.spent += vikiSpent;
+    result.viki.remaining += vikiRemaining;
+    result.viki.categories.push({ category, available: vikiBudget, spent: vikiSpent, remaining: vikiRemaining });
+
+    result.kata.assignedFromIncome += kataAssigned;
+    result.kata.available += kataBudget;
+    result.kata.spent += kataSpent;
+    result.kata.remaining += kataRemaining;
+    result.kata.categories.push({ category, available: kataBudget, spent: kataSpent, remaining: kataRemaining });
+
+    result.combined.push(combinedRow);
+  });
+
+  result.viki.categories = result.viki.categories
+    .filter((row) => Math.abs(row.available) > 0.009 || Math.abs(row.spent) > 0.009)
+    .sort((a, b) => safeNumber(b.available) - safeNumber(a.available));
+  result.kata.categories = result.kata.categories
+    .filter((row) => Math.abs(row.available) > 0.009 || Math.abs(row.spent) > 0.009)
+    .sort((a, b) => safeNumber(b.available) - safeNumber(a.available));
+  result.combined = result.combined
+    .filter((row) => Math.abs(row.totalBudget) > 0.009 || Math.abs(row.totalSpent) > 0.009)
+    .sort((a, b) => safeNumber(b.totalBudget) - safeNumber(a.totalBudget));
+
+  return result;
+}
+
+function renderPersonResponsibilityCard(personLabel, personData, totalIncome, personId) {
+  const percent = totalIncome > 0 ? (safeNumber(personData.assignedFromIncome) / safeNumber(totalIncome)) * 100 : 0;
+  const colorClass = personId === 'viki' ? 'account-viki' : 'account-kata';
+  return `
+    <div class="account-group-card ${colorClass}">
+      <div class="account-group-header">
+        <strong>${personId === 'viki' ? '🟦' : '🟩'} ${personLabel}</strong>
+        <span>${formatPercent(percent)} z příjmů</span>
+      </div>
+      <div class="account-group-meta">Na starosti z příjmů ${formatCurrency(personData.assignedFromIncome)}</div>
+      <div class="list" style="margin-top:10px;">
+        <div class="list-item"><span>Přiděleno (k dispozici)</span><strong>${formatCurrency(personData.available)}</strong></div>
+        <div class="list-item"><span>Utraceno</span><strong>${formatCurrency(personData.spent)}</strong></div>
+        <div class="list-item"><span>Zbývá</span><strong>${formatCurrency(personData.remaining)}</strong></div>
+      </div>
+      <div class="account-group-list" style="margin-top:10px;">
+        ${personData.categories.length ? personData.categories.map((row) => `<button class="account-envelope-item" type="button" data-category-id="${row.category.id}"><div class="account-envelope-header"><strong>${row.category.icon || '📦'} ${row.category.name}</strong><span>${formatCurrency(row.remaining)}</span></div><div class="account-envelope-meta">${formatCurrency(row.spent)} / ${formatCurrency(row.available)}</div></button>`).join('') : '<div class="empty">Žádné přiřazené kategorie</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderCombinedCategoryBudgetTable(rows) {
+  if (!rows.length) {
+    return '<div class="empty">Žádné kategorie pro zobrazení.</div>';
+  }
+
+  return `
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Kategorie</th>
+          <th>Rozpočet Viki</th>
+          <th>Rozpočet Káťa</th>
+          <th>Celkem rozpočet</th>
+          <th>Utraceno Viki</th>
+          <th>Utraceno Káťa</th>
+          <th>Utraceno celkem</th>
+          <th>Zbývá</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map((row) => `<tr><td>${row.category.icon || '📦'} ${row.category.name}</td><td>${formatCurrency(row.vikiBudget)}</td><td>${formatCurrency(row.kataBudget)}</td><td>${formatCurrency(row.totalBudget)}</td><td>${formatCurrency(row.vikiSpent)}</td><td>${formatCurrency(row.kataSpent)}</td><td>${formatCurrency(row.totalSpent)}</td><td>${formatCurrency(row.remaining)}</td></tr>`).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
 function transactionTextForMatching(transaction) {
   const categoryName = getCategoryById(transaction.category_id)?.name || '';
   const subcategoryName = getSubcategoryById(transaction.subcategory_id)?.name || '';
@@ -423,7 +613,10 @@ function computeTargetBudgetForCategory(category, periodId) {
   return Math.round((salaryBase * percentBudget) / 100);
 }
 function getExpensesForCategory(categoryId, periodId) {
-  return state.transactions.filter((t) => t.category_id === categoryId && t.type === 'expense' && t.period_id === periodId).reduce((sum, t) => sum + safeNumber(t.amount), 0);
+  return state.transactions
+    .filter((t) => t.category_id === categoryId && t.type === 'expense' && t.period_id === periodId)
+    .filter((t) => !isInternalTransferTransaction(t))
+    .reduce((sum, t) => sum + safeNumber(t.amount), 0);
 }
 function getEarliestPeriod() {
   if (!state.periods.length) return null;
@@ -451,6 +644,7 @@ function getIncomesTotalForPeriod(periodId) {
 function getExpensesTotalForPeriod(periodId) {
   return state.transactions
     .filter((t) => t.period_id === periodId && t.type === 'expense')
+    .filter((t) => !isInternalTransferTransaction(t))
     .reduce((sum, t) => sum + safeNumber(t.amount), 0);
 }
 function getClosingBalanceForPeriod(period) {
@@ -586,6 +780,7 @@ function computeCategoryPersonSplit(category, periodId, totalBudget) {
 
   state.transactions
     .filter((transaction) => transaction.period_id === periodId && transaction.category_id === category.id && transaction.type === 'expense')
+    .filter((transaction) => !isInternalTransferTransaction(transaction))
     .forEach((transaction) => {
       const amount = safeNumber(transaction.amount);
       if (transaction.paid_by === 'Viki') {
@@ -618,9 +813,9 @@ function computeCategoryPersonSplit(category, periodId, totalBudget) {
 function calculatePeriodSummary(period) {
   const tx = getTransactionsForPeriod(period.id);
   const incomes = tx.filter((t) => t.type === 'income').reduce((sum, t) => sum + safeNumber(t.amount), 0);
-  const expenses = tx.filter((t) => t.type === 'expense').reduce((sum, t) => sum + safeNumber(t.amount), 0);
+  const expenses = tx.filter((t) => t.type === 'expense' && !isInternalTransferTransaction(t)).reduce((sum, t) => sum + safeNumber(t.amount), 0);
   const unbudgetedExpenses = tx
-    .filter((t) => t.type === 'expense')
+    .filter((t) => t.type === 'expense' && !isInternalTransferTransaction(t))
     .reduce((sum, t) => {
       if (!t.category_id) {
         return sum + safeNumber(t.amount);
@@ -800,8 +995,8 @@ function getCategoryAccountGroup(category) {
   if (isCategorySplitEnabled(category)) return 'shared';
 
   const name = normalizeLabel(category.name);
-  const vikiNames = ['najem', 'psi', 'pojisteni', 'tv/internet', 'predplatne', 'jidlo v praci'];
-  const kataNames = ['drogerie', 'pohonne hmoty'];
+  const vikiNames = ['najem', 'psi', 'tv/internet', 'predplatne', 'osobni viki', 'telefon viki'];
+  const kataNames = ['drogerie', 'pohonne hmoty', 'uver', 'uvery', 'telefon kata', 'spotify', 'pojisteni', 'jidlo v praci', 'osobni kata'];
 
   if (vikiNames.some((label) => name.includes(label))) return 'viki';
   if (kataNames.some((label) => name.includes(label))) return 'kata';
@@ -2144,6 +2339,7 @@ function renderDashboard() {
   const previousPeriod = periodPrev || state.periods.find((p) => p.id !== period?.id) || null;
   const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0,plannedTotal:0,freeCash:0,unbudgetedExpenses:0 };
   const transfer = buildTransferSummary();
+  const responsibility = getPersonBudgetResponsibility(period);
   const vikiIncome = period
     ? state.transactions
       .filter((transaction) => transaction.period_id === period.id && transaction.type === 'income' && transaction.paid_by === 'Viki')
@@ -2228,12 +2424,26 @@ function renderDashboard() {
         <div class="stat-card"><div class="stat-label">Příjem Viki</div><div class="stat-value">${formatCurrency(vikiIncome)}</div></div>
         <div class="stat-card"><div class="stat-label">Příjem Káťa</div><div class="stat-value">${formatCurrency(kataIncome)}</div></div>
         <div class="stat-card"><div class="stat-label">Výdaje</div><div class="stat-value">${formatCurrency(summary.expenses)}</div></div>
+        <div class="stat-card"><div class="stat-label">Čerpání rozpočtů</div><div class="stat-value">${formatCurrency(summary.spentTotal)} / ${formatCurrency(summary.availableTotal)}</div></div>
+        <div class="stat-card"><div class="stat-label">Zbývá v rozpočtech</div><div class="stat-value">${formatCurrency(summary.remainingTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Bilance</div><div class="stat-value">${formatCurrency(summary.balance)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán rozpočtů</div><div class="stat-value">${formatCurrency(summary.plannedTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán poslat Kátě</div><div class="stat-value">${formatCurrency(transfer.kataPlanTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán Viki vedlejší účet</div><div class="stat-value">${formatCurrency(transfer.vikiSidePlanTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Výdaje mimo rozpočty</div><div class="stat-value">${formatCurrency(summary.unbudgetedExpenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Volné k rozdělení</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
+      </div>
+      <div class="grid grid-2" style="margin-top:16px;">
+        ${renderPersonResponsibilityCard('Viki', responsibility.viki, summary.incomes, 'viki')}
+        ${renderPersonResponsibilityCard('Káťa', responsibility.kata, summary.incomes, 'kata')}
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h3>Společný přehled kategorií</h3>
+        <p style="color:var(--muted); margin-top:6px;">Rozpočty i výdaje jsou rozdělené podle osoby a zároveň sloučené do jednoho přehledu.</p>
+        <div style="margin-top:12px; overflow:auto;">
+          ${renderCombinedCategoryBudgetTable(responsibility.combined)}
+        </div>
       </div>
       ${renderTransferOverview(period)}
       <div class="grid grid-2" style="margin-top:16px;">
