@@ -43,11 +43,14 @@ create table if not exists categories (
   icon text default '📦',
   color text default '#2563eb',
   default_budget numeric(12,2) not null default 0 check (default_budget >= 0),
+  allocation_percent numeric(5,2) not null default 0 check (allocation_percent between 0 and 100),
   rollover_mode text not null default 'none' check (rollover_mode in ('none','positive','both')),
   active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table categories add column if not exists allocation_percent numeric(5,2) not null default 0;
 
 create table if not exists period_budgets (
   id uuid primary key default gen_random_uuid(),

@@ -10,6 +10,7 @@ let state = {
   recurringTransactions: [],
   transactions: [],
   currentPeriodId: null,
+  lastPeriodAutoPromptDate: null,
   loading: false,
   status: null,
   filters: { periodId: 'all', categoryId: 'all', person: 'all', type: 'all', search: '' },
@@ -187,6 +188,32 @@ function getPeriodForDate(dateValue) {
   });
   return matchingPeriod?.id || state.currentPeriodId || state.periods[0]?.id || null;
 }
+function getPeriodByDate(dateValue) {
+  return state.periods.find((period) => dateValue >= period.start_date && dateValue <= period.end_date) || null;
+}
+function getConfirmedSalariesTotal(periodId) {
+  if (!hasBothSalariesInPeriod(periodId)) {
+    return 0;
+  }
+  return state.transactions
+    .filter((t) => t.period_id === periodId && t.type === 'income' && (t.paid_by === 'Viki' || t.paid_by === 'Káťa'))
+    .reduce((sum, t) => sum + safeNumber(t.amount), 0);
+}
+function computeTargetBudgetForCategory(category, periodId) {
+  const fixedBudget = safeNumber(category.default_budget);
+  if (fixedBudget > 0) {
+    return fixedBudget;
+  }
+  const percentBudget = safeNumber(category.allocation_percent);
+  if (percentBudget <= 0) {
+    return 0;
+  }
+  const salaryBase = getConfirmedSalariesTotal(periodId);
+  if (salaryBase <= 0) {
+    return 0;
+  }
+  return Math.round((salaryBase * percentBudget) / 100);
+}
 function getExpensesForCategory(categoryId, periodId) {
   return state.transactions.filter((t) => t.category_id === categoryId && t.type === 'expense' && t.period_id === periodId).reduce((sum, t) => sum + safeNumber(t.amount), 0);
 }
@@ -260,11 +287,12 @@ function computeNextRecurringDate(rule, fromDate) {
 }
 function computeCategoryMetrics(category, period) {
   if (!period) {
-    return { expenses: 0, baseBudget: safeNumber(category.default_budget), rolloverAmount: 0, manualAdjustment: 0, totalAvailable: safeNumber(category.default_budget), remaining: safeNumber(category.default_budget), usagePercent: 0, baseUsagePercent: 100 };
+    const fallbackBudget = safeNumber(category.default_budget);
+    return { expenses: 0, baseBudget: fallbackBudget, rolloverAmount: 0, manualAdjustment: 0, totalAvailable: fallbackBudget, remaining: fallbackBudget, usagePercent: 0, baseUsagePercent: 100 };
   }
   const expenses = getExpensesForCategory(category.id, period.id);
   const periodBudget = getPeriodBudgetRecord(category.id, period.id);
-  const baseBudget = safeNumber(periodBudget?.base_budget ?? category.default_budget);
+  const baseBudget = safeNumber(periodBudget?.base_budget ?? computeTargetBudgetForCategory(category, period.id));
   const rolloverAmount = safeNumber(periodBudget?.rollover_amount ?? 0);
   const manualAdjustment = safeNumber(periodBudget?.manual_adjustment ?? 0);
   const computedAvailable = baseBudget + rolloverAmount + manualAdjustment;
@@ -292,6 +320,24 @@ function calculatePeriodSummary(period) {
   return { incomes, expenses, openingBalance, balance, categoryBudgetTotal, rolloverTotal, availableTotal, spentTotal, remainingTotal, plannedTotal, freeCash };
 }
 
+async function ensureCurrentPeriodWithConfirmation() {
+  const today = getToday();
+  if (getPeriodByDate(today)) {
+    return;
+  }
+  if (state.lastPeriodAutoPromptDate === today) {
+    return;
+  }
+
+  state.lastPeriodAutoPromptDate = today;
+  const nextPeriod = getNextMonthlyPeriodPayload();
+  const shouldCreate = confirm(`Není vytvořené období pro dnešní datum. Chceš vytvořit období ${nextPeriod.name} (${nextPeriod.start_date} - ${nextPeriod.end_date})?`);
+  if (!shouldCreate) {
+    return;
+  }
+  await createPeriod(nextPeriod);
+}
+
 async function createPeriodBudgetsForPeriod(period) {
   if (!period?.id) return;
 
@@ -306,7 +352,7 @@ async function createPeriodBudgetsForPeriod(period) {
     const budgetRows = activeCategories.map((category) => {
       const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
       const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
-      const baseBudget = safeNumber(category.default_budget);
+      const baseBudget = computeTargetBudgetForCategory(category, period.id);
       const manualAdjustment = 0;
       const totalAvailable = baseBudget + rolloverAmount + manualAdjustment;
 
@@ -337,7 +383,7 @@ async function createBudgetForCategoryInCurrentPeriod(category) {
     const previousPeriod = getPreviousPeriod(period);
     const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
     const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
-    const baseBudget = safeNumber(category.default_budget);
+    const baseBudget = computeTargetBudgetForCategory(category, period.id);
 
     await supabaseCall('POST', 'period_budgets', {}, {
       period_id: period.id,
@@ -356,7 +402,12 @@ async function ensurePersonalCategories() {
   if (!state.household?.id) return;
 
   for (const item of PERSONAL_BUDGETS) {
-    const existing = state.categories.find((category) => category.name === item.name);
+    const existingRows = await supabaseCall('GET', 'categories', {
+      household_id: `eq.${state.household.id}`,
+      name: `eq.${item.name}`,
+      limit: 1,
+    });
+    const existing = existingRows?.[0] || null;
     if (existing) {
       if (safeNumber(existing.default_budget) !== item.amount || existing.active === false) {
         await supabaseCall('PATCH', 'categories', { id: `eq.${existing.id}` }, {
@@ -428,7 +479,7 @@ async function applyBudgetAllocationForPeriod(period, options = { askConfirmatio
   if (period.allocation_confirmed) return;
 
   const categories = state.categories.filter((category) => category.active !== false);
-  const plannedBase = categories.reduce((sum, category) => sum + safeNumber(category.default_budget), 0);
+  const plannedBase = categories.reduce((sum, category) => sum + computeTargetBudgetForCategory(category, period.id), 0);
   const availableCash = getOpeningBalanceForPeriod(period) + getIncomesTotalForPeriod(period.id);
   const delta = availableCash - plannedBase;
   const needsWarning = plannedBase > availableCash;
@@ -525,7 +576,6 @@ async function loadAllData() {
   render();
   try {
     await ensureDefaultHousehold();
-    await ensurePersonalCategories();
     const [households, periods, categories, transactions] = await Promise.all([
       supabaseCall('GET', 'households', { limit: 1 }),
       supabaseCall('GET', 'budget_periods', { order: 'start_date.desc' }),
@@ -555,6 +605,9 @@ async function loadAllData() {
     state.recurringTransactions = recurringTransactions || [];
     state.transactions = transactions || [];
 
+    await ensurePersonalCategories();
+    state.categories = await supabaseCall('GET', 'categories', { order: 'name.asc' });
+
     if (state.recurringTransactions.length) {
       await runRecurringTransactionsForToday();
       state.recurringTransactions = await supabaseCall('GET', 'recurring_transactions', { order: 'created_at.desc' });
@@ -568,6 +621,7 @@ async function loadAllData() {
       state.currentPeriodId = state.periods[0].id;
     }
     state.status = null;
+    await ensureCurrentPeriodWithConfirmation();
   } catch (error) {
     state.status = { type: 'error', message: 'Chyba při načítání: ' + formatApiErrorMessage(error) };
   }
@@ -844,6 +898,215 @@ async function deleteRecurringTransaction(id) {
   }
 }
 
+function showCreateRecurringModal() {
+  const current = getCurrentPeriod();
+  const form = `
+    <div class="modal-card">
+      <div class="row" style="justify-content: space-between; align-items:center;">
+        <h3>Nové opakování</h3>
+        <button class="btn btn-secondary" id="close-modal">Zavřít</button>
+      </div>
+      <form id="recurring-form" class="form-grid" style="margin-top:12px;">
+        <label>Typ<select name="type"><option value="expense">Výdaj</option><option value="income">Příjem</option></select></label>
+        <label>Částka<input name="amount" type="number" step="0.01" required></label>
+        <label>Kategorie<select name="category_id"><option value="">Bez kategorie</option>${state.categories.filter((c) => c.active !== false).map((category) => `<option value="${category.id}">${category.name}</option>`).join('')}</select></label>
+        <label>Osoba<select name="paid_by"><option value="Viki">Viki</option><option value="Káťa">Káťa</option><option value="Společné" selected>Společné</option></select></label>
+        <label>Poznámka<textarea name="note"></textarea></label>
+        <label>Frekvence<select name="frequency" id="recurring-frequency"><option value="weekly">Týdně</option><option value="monthly" selected>Měsíčně</option><option value="semiannual">Půlročně</option><option value="yearly">Ročně</option></select></label>
+        <label>Start datum<input name="start_date" id="recurring-start-date" type="date" value="${current?.start_date || getToday()}" required></label>
+        <div id="overflow-block" style="display:none; border:1px solid var(--border); border-radius:12px; padding:10px; background:var(--surface-alt);">
+          <label>Den v měsíci může některý měsíc chybět. Co udělat?
+            <select name="day_overflow_strategy" id="day-overflow-strategy">
+              <option value="last_day" selected>Použít poslední den měsíce</option>
+              <option value="custom_day">Použít jiný den v měsíci</option>
+            </select>
+          </label>
+          <label id="custom-day-wrap" style="display:none; margin-top:8px;">Vybraný den (1-31)
+            <input name="custom_day" id="custom-day" type="number" min="1" max="31" value="28">
+          </label>
+        </div>
+        <button class="btn btn-primary" type="submit">Uložit opakování</button>
+      </form>
+    </div>
+  `;
+
+  showModal(form);
+  document.getElementById('close-modal')?.addEventListener('click', closeModal);
+  const frequencyEl = document.getElementById('recurring-frequency');
+  const startDateEl = document.getElementById('recurring-start-date');
+  const overflowBlock = document.getElementById('overflow-block');
+  const overflowStrategy = document.getElementById('day-overflow-strategy');
+  const customDayWrap = document.getElementById('custom-day-wrap');
+
+  const updateOverflowVisibility = () => {
+    const freq = frequencyEl?.value;
+    const start = startDateEl?.value;
+    const date = parseDateOnly(start);
+    const day = date ? date.getUTCDate() : 0;
+    const needsMonthRule = freq === 'monthly' || freq === 'semiannual' || freq === 'yearly';
+    overflowBlock.style.display = needsMonthRule && day >= 29 ? 'block' : 'none';
+    customDayWrap.style.display = overflowStrategy?.value === 'custom_day' ? 'block' : 'none';
+  };
+
+  frequencyEl?.addEventListener('change', updateOverflowVisibility);
+  startDateEl?.addEventListener('change', updateOverflowVisibility);
+  overflowStrategy?.addEventListener('change', updateOverflowVisibility);
+  updateOverflowVisibility();
+
+  document.getElementById('recurring-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    payload.amount = Number(payload.amount);
+    payload.custom_day = payload.custom_day ? Number(payload.custom_day) : null;
+    if (!payload.day_overflow_strategy) {
+      payload.day_overflow_strategy = 'last_day';
+    }
+    try {
+      await createRecurringTransaction(payload);
+      closeModal();
+      state.status = { type: 'success', message: 'Opakovaná transakce byla vytvořena.' };
+      await loadAllData();
+    } catch (error) {
+      state.status = { type: 'error', message: formatApiErrorMessage(error) };
+      render();
+    }
+  });
+}
+
+function exportJsonBackup() {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    household: state.household,
+    periods: state.periods,
+    categories: state.categories,
+    periodBudgets: state.periodBudgets,
+    transactions: state.transactions,
+    recurringTransactions: state.recurringTransactions,
+  };
+  downloadFile('finance-backup.json', JSON.stringify(payload, null, 2), 'application/json');
+}
+
+function exportTransactionsCsv() {
+  const rows = state.transactions.map((t) => ({
+    datum: t.transaction_date,
+    typ: t.type,
+    castka: t.amount,
+    kategorie: getCategoryById(t.category_id)?.name || '',
+    osoba: t.paid_by,
+    poznamka: t.note || '',
+  }));
+  downloadFile('transakce.csv', toCsv(rows), 'text/csv;charset=utf-8;');
+}
+
+function exportCategoriesCsv() {
+  const rows = state.categories.map((category) => ({
+    nazev: category.name,
+    ikona: category.icon,
+    fixni_rozpocet: category.default_budget,
+    procento: category.allocation_percent || 0,
+    aktivni: category.active,
+  }));
+  downloadFile('kategorie.csv', toCsv(rows), 'text/csv;charset=utf-8;');
+}
+
+async function renameHousehold(name) {
+  if (!state.household?.id) return;
+  if (!name?.trim()) return;
+  state.loading = true;
+  render();
+  try {
+    await supabaseCall('PATCH', 'households', { id: `eq.${state.household.id}` }, { name: name.trim() });
+    state.status = { type: 'success', message: 'Domácnost přejmenována.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
+async function resetCurrentPeriod(includePeriod) {
+  const period = getCurrentPeriod();
+  if (!period) return;
+  const label = includePeriod ? 'smazání období včetně transakcí' : 'smazání transakcí období';
+  if (!confirm(`Potvrď ${label}.`)) return;
+  if (!confirm('Opravdu pokračovat? Tato akce je nevratná.')) return;
+
+  state.loading = true;
+  render();
+  try {
+    if (includePeriod) {
+      await supabaseCall('DELETE', 'budget_periods', { id: `eq.${period.id}` });
+    } else {
+      await supabaseCall('DELETE', 'transactions', { period_id: `eq.${period.id}` });
+      await supabaseCall('DELETE', 'period_budgets', { period_id: `eq.${period.id}` });
+      await supabaseCall('PATCH', 'budget_periods', { id: `eq.${period.id}` }, { allocation_confirmed: false });
+    }
+    state.status = { type: 'success', message: 'Operace byla provedena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
+async function resetWholeHousehold() {
+  if (!state.household?.id) return;
+  if (!confirm('Potvrď reset celé domácnosti.')) return;
+  if (!confirm('Opravdu smazat všechna období, transakce, kategorie a opakování?')) return;
+
+  state.loading = true;
+  render();
+  try {
+    await supabaseCall('DELETE', 'households', { id: `eq.${state.household.id}` });
+    state.status = { type: 'success', message: 'Domácnost byla resetována.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
+async function importJsonBackup(file) {
+  if (!file || !state.household?.id) return;
+  const text = await file.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    state.status = { type: 'error', message: 'Soubor není platný JSON.' };
+    render();
+    return;
+  }
+  if (!confirm('Import přidá data do aktuální domácnosti. Pokračovat?')) return;
+  if (!confirm('Druhé potvrzení: opravdu importovat data?')) return;
+
+  state.loading = true;
+  render();
+  try {
+    if (Array.isArray(data.categories) && data.categories.length) {
+      const mappedCategories = data.categories.map((category) => ({
+        household_id: state.household.id,
+        name: category.name,
+        type: category.type || 'expense',
+        icon: category.icon || '📦',
+        default_budget: safeNumber(category.default_budget),
+        allocation_percent: safeNumber(category.allocation_percent),
+        active: category.active !== false,
+      }));
+      await supabaseCall('POST', 'categories', {}, mappedCategories);
+    }
+    state.status = { type: 'success', message: 'Import dokončen. Zkontroluj data v přehledu.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
 // UI functions
 function setView(view) {
   currentView = view;
@@ -864,6 +1127,18 @@ function renderDashboard() {
   const previousPeriod = state.periods.find((p) => p.id !== period?.id) || null;
   const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0 };
   const previousSummary = previousPeriod ? calculatePeriodSummary(previousPeriod) : null;
+  const chartRows = period
+    ? state.categories
+      .filter((category) => category.active !== false)
+      .map((category) => {
+        const spent = getExpensesForCategory(category.id, period.id);
+        return { name: category.name, icon: category.icon || '📦', spent };
+      })
+      .filter((row) => row.spent > 0)
+      .sort((a, b) => b.spent - a.spent)
+      .slice(0, 6)
+    : [];
+  const chartMax = chartRows.reduce((max, row) => Math.max(max, row.spent), 0) || 1;
   return `
     <div class="container">
       <div class="card">
@@ -924,6 +1199,11 @@ function renderDashboard() {
           </div>
         </div>
       </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h3>Největší výdaje období</h3>
+        ${chartRows.length ? `<div class="mini-chart" style="margin-top:12px;">${chartRows.map((row) => `<div class="mini-chart-row"><div class="mini-chart-label">${row.icon} ${row.name}</div><div class="mini-chart-track"><span style="width:${Math.max(10, Math.round((row.spent / chartMax) * 100))}%"></span></div><div class="mini-chart-value">${formatCurrency(row.spent)}</div></div>`).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Zatím nejsou žádné výdaje v kategoriích.</div>'}
+      </div>
     </div>
   `;
 }
@@ -946,7 +1226,7 @@ function renderHistory() {
   return `<div class="container">
     <div class="card">
       <div class="row" style="justify-content: space-between; align-items:center;">
-        <h2>Historie transakcí</h2>
+        <h2>Peněženka a transakce</h2>
         <button class="btn btn-primary" data-action="show-add-transaction">Přidat transakci</button>
       </div>
       <div class="grid grid-3" style="margin-top:12px;">
@@ -987,7 +1267,7 @@ function renderHistory() {
 }
 
 function renderBudgetManagement() {
-  return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat kategorii</button></div><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button></div></div>`).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
+  return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat kategorii</button></div><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Fixně: ${formatCurrency(category.default_budget)} · Procento: ${safeNumber(category.allocation_percent)} % (použije se jen pokud fixní=0)</div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button></div></div>`).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
 }
 
 function renderPeriods() {
@@ -1041,15 +1321,85 @@ function renderPeriods() {
   `;
 }
 
+function toCsv(rows) {
+  if (!rows.length) return '';
+  const headers = Object.keys(rows[0]);
+  const escape = (value) => {
+    const text = String(value ?? '');
+    if (text.includes('"') || text.includes(';') || text.includes('\n')) {
+      return `"${text.replaceAll('"', '""')}"`;
+    }
+    return text;
+  };
+  const lines = [headers.join(';')];
+  rows.forEach((row) => {
+    lines.push(headers.map((header) => escape(row[header])).join(';'));
+  });
+  return lines.join('\n');
+}
+
+function downloadFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function renderSettings() {
+  return `
+    ${renderPeriods()}
+    <div class="container" style="margin-top:16px;">
+      <div class="card">
+        <div class="row" style="justify-content: space-between; align-items:center;">
+          <h2>Opakované transakce</h2>
+          <button class="btn btn-primary" data-action="show-create-recurring">Nové opakování</button>
+        </div>
+        <p style="color:var(--muted); margin-top:8px;">Spravuj opakované platby i příjmy. Změny můžeš aplikovat od vybraného data.</p>
+        <div class="list" style="margin-top:12px;">
+          ${state.recurringTransactions.length ? state.recurringTransactions.map((rule) => `<div class="list-item"><strong>${rule.type === 'income' ? 'Příjem' : 'Výdaj'} · ${formatCurrency(rule.amount)}</strong><div style="color:var(--muted); margin-top:6px;">Frekvence: ${rule.frequency} · další spuštění: ${rule.next_run_date}</div><div class="row" style="margin-top:8px;"><button class="btn btn-danger" data-action="delete-recurring" data-id="${rule.id}">Smazat</button></div></div>`).join('') : '<div class="empty">Žádná opakování</div>'}
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2>Import a export</h2>
+        <div class="row" style="margin-top:12px;">
+          <button class="btn btn-secondary" data-action="export-json">Export JSON záloha</button>
+          <button class="btn btn-secondary" data-action="export-csv-transactions">Export CSV transakce</button>
+          <button class="btn btn-secondary" data-action="export-csv-categories">Export CSV kategorie</button>
+          <label class="btn btn-secondary" style="display:inline-flex; align-items:center;">Import JSON<input id="import-json-input" type="file" accept="application/json" style="display:none;"></label>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2>Správa domácnosti</h2>
+        <form id="household-rename-form" class="row" style="margin-top:12px; align-items:end;">
+          <label style="max-width:280px;">Název domácnosti
+            <input id="household-name" value="${state.household?.name || ''}" required>
+          </label>
+          <button class="btn btn-secondary" type="submit">Přejmenovat</button>
+        </form>
+        <div class="row" style="margin-top:12px;">
+          <button class="btn btn-danger" data-action="reset-period-with-transactions">Smazat období včetně transakcí</button>
+          <button class="btn btn-danger" data-action="reset-period-transactions">Smazat jen transakce období</button>
+          <button class="btn btn-danger" data-action="reset-all-household">Reset celé domácnosti</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderSidebar() {
   return `
     <aside class="sidebar">
       <div class="brand">Viki & Káťa</div>
       <nav>
         <button class="nav-btn ${currentView === 'dashboard' ? 'active' : ''}" data-view="dashboard">Dashboard</button>
-        <button class="nav-btn ${currentView === 'history' ? 'active' : ''}" data-view="history">Historie</button>
+        <button class="nav-btn ${currentView === 'wallet' ? 'active' : ''}" data-view="wallet">Peněženka</button>
         <button class="nav-btn ${currentView === 'budgets' ? 'active' : ''}" data-view="budgets">Rozpočty</button>
-        <button class="nav-btn ${currentView === 'periods' ? 'active' : ''}" data-view="periods">Období</button>
+        <button class="nav-btn ${currentView === 'settings' ? 'active' : ''}" data-view="settings">Nastavení</button>
       </nav>
       <div class="card" style="background: rgba(255,255,255,.08); border: 0; color: white;">
         <strong>Rychlé akce</strong>
@@ -1065,8 +1415,9 @@ function renderMobileNav() {
   return `
     <div class="mobile-nav">
       <button data-view="dashboard">Dashboard</button>
-      <button data-view="history">Historie</button>
+      <button data-view="wallet">Peněženka</button>
       <button data-view="budgets">Rozpočty</button>
+      <button data-view="settings">Nastavení</button>
     </div>
   `;
 }
@@ -1082,9 +1433,9 @@ function render() {
         </div>
         <div class="content">
           ${currentView === 'dashboard' ? renderDashboard() : ''}
-          ${currentView === 'history' ? renderHistory() : ''}
+          ${currentView === 'wallet' ? renderHistory() : ''}
           ${currentView === 'budgets' ? renderBudgetManagement() : ''}
-          ${currentView === 'periods' ? renderPeriods() : ''}
+          ${currentView === 'settings' ? renderSettings() : ''}
         </div>
       </div>
     </div>
@@ -1141,6 +1492,23 @@ function attachEvents() {
     updateInitialBalance(nextBalance);
   });
   document.querySelectorAll('[data-action="delete-recurring"]').forEach((btn) => btn.addEventListener('click', () => deleteRecurringTransaction(btn.dataset.id)));
+  document.querySelectorAll('[data-action="show-create-recurring"]').forEach((btn) => btn.addEventListener('click', () => showCreateRecurringModal()));
+  document.querySelectorAll('[data-action="export-json"]').forEach((btn) => btn.addEventListener('click', exportJsonBackup));
+  document.querySelectorAll('[data-action="export-csv-transactions"]').forEach((btn) => btn.addEventListener('click', exportTransactionsCsv));
+  document.querySelectorAll('[data-action="export-csv-categories"]').forEach((btn) => btn.addEventListener('click', exportCategoriesCsv));
+  document.querySelectorAll('[data-action="reset-period-with-transactions"]').forEach((btn) => btn.addEventListener('click', () => resetCurrentPeriod(true)));
+  document.querySelectorAll('[data-action="reset-period-transactions"]').forEach((btn) => btn.addEventListener('click', () => resetCurrentPeriod(false)));
+  document.querySelectorAll('[data-action="reset-all-household"]').forEach((btn) => btn.addEventListener('click', () => resetWholeHousehold()));
+  document.getElementById('household-rename-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    renameHousehold(document.getElementById('household-name')?.value);
+  });
+  document.getElementById('import-json-input')?.addEventListener('change', (event) => {
+    const [file] = event.target.files || [];
+    if (file) {
+      importJsonBackup(file);
+    }
+  });
 }
 
 function showTransactionModal(transactionId = null) {
@@ -1175,15 +1543,17 @@ function showTransactionModal(transactionId = null) {
             <label>Start opakování
               <input id="recurring-start-date" type="date" value="${transaction?.transaction_date || getToday()}">
             </label>
-            <label>Neexistující den v měsíci
-              <select id="recurring-overflow-strategy">
-                <option value="last_day" selected>Použít poslední den měsíce</option>
-                <option value="custom_day">Zvolit jiný den v měsíci</option>
-              </select>
-            </label>
-            <label id="recurring-custom-day-wrap" style="display:none;">Náhradní den (1-31)
-              <input id="recurring-custom-day" type="number" min="1" max="31" value="28">
-            </label>
+            <div id="recurring-overflow-wrap" style="display:none; border:1px solid var(--border); border-radius:12px; padding:10px; background:var(--surface-alt);">
+              <label>Neexistující den v měsíci
+                <select id="recurring-overflow-strategy">
+                  <option value="last_day" selected>Použít poslední den měsíce</option>
+                  <option value="custom_day">Zvolit jiný den v měsíci</option>
+                </select>
+              </label>
+              <label id="recurring-custom-day-wrap" style="display:none; margin-top:8px;">Náhradní den (1-31)
+                <input id="recurring-custom-day" type="number" min="1" max="31" value="28">
+              </label>
+            </div>
           </div>
         `}
         <div class="row">
@@ -1196,14 +1566,32 @@ function showTransactionModal(transactionId = null) {
   document.getElementById('close-modal').addEventListener('click', closeModal);
   const recurringEnabled = document.getElementById('recurring-enabled');
   const recurringOptions = document.getElementById('recurring-options');
+  const recurringOverflowWrap = document.getElementById('recurring-overflow-wrap');
+  const recurringFrequencyEl = document.getElementById('recurring-frequency');
+  const recurringStartDateEl = document.getElementById('recurring-start-date');
   const recurringOverflow = document.getElementById('recurring-overflow-strategy');
   const recurringCustomWrap = document.getElementById('recurring-custom-day-wrap');
   recurringEnabled?.addEventListener('change', () => {
     recurringOptions.style.display = recurringEnabled.checked ? 'grid' : 'none';
   });
+  const updateRecurringOverflowVisibility = () => {
+    const frequency = recurringFrequencyEl?.value;
+    const startDate = recurringStartDateEl?.value;
+    const day = parseDateOnly(startDate)?.getUTCDate() || 0;
+    const needsMonthlyRule = frequency === 'monthly' || frequency === 'semiannual' || frequency === 'yearly';
+    if (recurringOverflowWrap) {
+      recurringOverflowWrap.style.display = needsMonthlyRule && day >= 29 ? 'block' : 'none';
+    }
+    if (recurringCustomWrap) {
+      recurringCustomWrap.style.display = recurringOverflow?.value === 'custom_day' ? 'block' : 'none';
+    }
+  };
+  recurringFrequencyEl?.addEventListener('change', updateRecurringOverflowVisibility);
+  recurringStartDateEl?.addEventListener('change', updateRecurringOverflowVisibility);
   recurringOverflow?.addEventListener('change', () => {
-    recurringCustomWrap.style.display = recurringOverflow.value === 'custom_day' ? 'block' : 'none';
+    updateRecurringOverflowVisibility();
   });
+  updateRecurringOverflowVisibility();
   document.getElementById('transaction-form').addEventListener('submit', (event) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
@@ -1264,6 +1652,7 @@ function showCategoryModal(categoryId = null) {
         <label>Název<select name="name" id="category-name" required>${getCategoryNameOptions(selectedName)}</select></label>
         <label>Ikona<select name="icon" id="category-icon">${getCategoryIconOptions(selectedIcon)}</select></label>
         <label>Výchozí rozpočet<input name="default_budget" type="number" step="0.01" value="${category?.default_budget || 0}"></label>
+        <label>Procento z potvrzených výplat (0-100)<input name="allocation_percent" type="number" step="0.01" min="0" max="100" value="${category?.allocation_percent || 0}"></label>
         <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${category ? 'Uložit' : 'Přidat'}</button>
       </form>
     </div>`;
@@ -1287,6 +1676,7 @@ function showCategoryModal(categoryId = null) {
     const formData = new FormData(event.currentTarget);
     const payload = Object.fromEntries(formData.entries());
     payload.default_budget = Number(payload.default_budget);
+    payload.allocation_percent = Number(payload.allocation_percent);
     if (!category) {
       payload.active = true;
       payload.type = 'expense';
