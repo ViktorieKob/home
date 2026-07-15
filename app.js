@@ -15,6 +15,7 @@ let state = {
   loading: false,
   status: null,
   dashboardExpenseChartMode: 'category',
+  transferPlan: null,
   filters: { periodId: 'all', categoryId: 'all', person: 'all', type: 'all', search: '' },
 };
 
@@ -70,6 +71,24 @@ const DEFAULT_SUBCATEGORY_LIBRARY = {
   'Úvěr': ['Úvěr 1', 'Úvěr 2', 'Úvěr 3'],
   'Pohonné hmoty': ['Modrá', 'Černá'],
   'Psi': ['Meggie', 'Džejna'],
+};
+const DEFAULT_TRANSFER_PLAN = {
+  kata_loan_1: 6596,
+  kata_loan_2: 1485,
+  kata_loan_3: 2188,
+  kata_insurance_l: 310,
+  kata_phone_o2: 700,
+  kata_drogerie: 2000,
+  kata_food_share: 5000,
+  kata_fuel: 3500,
+  kata_work_food: 2600,
+  kata_spotify: 185,
+  viki_phone: 1300,
+  viki_chatgpt: 499,
+  viki_icloud: 249,
+  viki_netflix: 528,
+  viki_oneplay: 298,
+  viki_personal: 4000,
 };
 
 // Helper functions
@@ -165,6 +184,72 @@ function getToday() {
 }
 function generateId() {
   return Math.random().toString(36).substr(2, 9);
+}
+function getTransferPlanStorageKey() {
+  const householdId = state.household?.id || 'default';
+  return `home-transfer-plan-${householdId}`;
+}
+function getTransferPlan() {
+  return {
+    ...DEFAULT_TRANSFER_PLAN,
+    ...(state.transferPlan || {}),
+  };
+}
+function loadTransferPlanFromStorage() {
+  try {
+    const raw = localStorage.getItem(getTransferPlanStorageKey());
+    if (!raw) {
+      state.transferPlan = { ...DEFAULT_TRANSFER_PLAN };
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    state.transferPlan = {
+      ...DEFAULT_TRANSFER_PLAN,
+      ...(parsed || {}),
+    };
+  } catch {
+    state.transferPlan = { ...DEFAULT_TRANSFER_PLAN };
+  }
+}
+function saveTransferPlanToStorage(plan) {
+  state.transferPlan = {
+    ...DEFAULT_TRANSFER_PLAN,
+    ...(plan || {}),
+  };
+  try {
+    localStorage.setItem(getTransferPlanStorageKey(), JSON.stringify(state.transferPlan));
+  } catch {
+    // localStorage may be unavailable in strict privacy contexts.
+  }
+}
+function buildTransferSummary() {
+  const plan = getTransferPlan();
+  const kataItems = [
+    { key: 'kata_loan_1', label: 'Úvěr 1' },
+    { key: 'kata_loan_2', label: 'Úvěr 2' },
+    { key: 'kata_loan_3', label: 'Úvěr 3' },
+    { key: 'kata_insurance_l', label: 'Pojištění L' },
+    { key: 'kata_phone_o2', label: 'Telefon O2 (Káťa)' },
+    { key: 'kata_drogerie', label: 'Drogerie (Káťa)' },
+    { key: 'kata_food_share', label: 'Potraviny - část Káťa' },
+    { key: 'kata_fuel', label: 'Pohonné hmoty (Káťa)' },
+    { key: 'kata_work_food', label: 'Jídlo v práci - Káťa' },
+    { key: 'kata_spotify', label: 'Spotify (Káťa)' },
+  ].map((item) => ({ ...item, amount: safeNumber(plan[item.key]) }));
+
+  const vikiItems = [
+    { key: 'viki_phone', label: 'Telefon Viki' },
+    { key: 'viki_chatgpt', label: 'ChatGPT' },
+    { key: 'viki_icloud', label: 'iCloud' },
+    { key: 'viki_netflix', label: 'Netflix' },
+    { key: 'viki_oneplay', label: 'Oneplay' },
+    { key: 'viki_personal', label: 'Osobní část Viki' },
+  ].map((item) => ({ ...item, amount: safeNumber(plan[item.key]) }));
+
+  const kataTotal = kataItems.reduce((sum, item) => sum + item.amount, 0);
+  const vikiTransferTotal = vikiItems.reduce((sum, item) => sum + item.amount, 0);
+
+  return { kataItems, vikiItems, kataTotal, vikiTransferTotal };
 }
 function formatApiErrorMessage(error) {
   const message = String(error?.message || error || 'Neznámá chyba');
