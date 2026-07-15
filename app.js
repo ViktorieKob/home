@@ -347,7 +347,10 @@ async function loadAllData() {
     state.categories = categories || [];
     state.periodBudgets = periodBudgets || [];
     state.transactions = transactions || [];
-    
+
+    if (!state.periods.some((period) => period.id === state.currentPeriodId)) {
+      state.currentPeriodId = state.periods[0]?.id || null;
+    }
     if (!state.currentPeriodId && state.periods.length) {
       state.currentPeriodId = state.periods[0].id;
     }
@@ -521,6 +524,26 @@ async function updatePeriod(id, payload) {
   }
 }
 
+async function deletePeriod(id) {
+  if (!confirm('Opravdu chcete smazat období? Smažou se i navázané rozpočty období.')) return false;
+  state.loading = true;
+  render();
+
+  try {
+    await supabaseCall('DELETE', 'budget_periods', { id: `eq.${id}` });
+    if (state.currentPeriodId === id) {
+      const remaining = state.periods.filter((period) => period.id !== id);
+      state.currentPeriodId = remaining[0]?.id || null;
+    }
+    state.status = { type: 'success', message: 'Období smazáno.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
 async function updateBudgetStartDay(startDay) {
   if (!state.household?.id) {
     state.status = { type: 'error', message: 'Nejdřív je potřeba vytvořit domácnost.' };
@@ -669,7 +692,7 @@ function renderBudgetManagement() {
 
 function renderPeriods() {
   const nextPeriod = getNextMonthlyPeriodPayload();
-  return `<div class="container"><div class="card"><h2>Nastavení období</h2><form id="period-start-day-form" class="row" style="margin-top:12px; gap:12px; align-items:end;"><label style="max-width:240px;">Začátek rozpočtového měsíce (1-31)<input id="budget-start-day" name="budget_start_day" type="number" min="1" max="31" required value="${getBudgetStartDay()}"></label><button class="btn btn-secondary" type="submit">Uložit den</button></form><p style="color:var(--muted); margin-top:10px;">Další období se bude tvořit automaticky od zvoleného dne.</p></div><div class="card" style="margin-top:16px;"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa období</h2><button class="btn btn-primary" data-action="show-create-period">Vytvořit další měsíc</button></div><div class="list" style="margin-top:12px;"><div class="list-item"><strong>Následující období</strong><div style="color:var(--muted); margin-top:6px;">${nextPeriod.name} · ${nextPeriod.start_date} → ${nextPeriod.end_date}</div></div>${state.periods.length ? state.periods.map((period) => `<div class="list-item"><strong>${period.name}</strong><div style="color:var(--muted); margin-top:6px;">${period.start_date} → ${period.end_date}</div></div>`).join('') : '<div class="empty">Žádná období</div>'}</div></div></div>`;
+  return `<div class="container"><div class="card"><h2>Nastavení období</h2><form id="period-start-day-form" class="row" style="margin-top:12px; gap:12px; align-items:end;"><label style="max-width:240px;">Začátek rozpočtového měsíce (1-31)<input id="budget-start-day" name="budget_start_day" type="number" min="1" max="31" required value="${getBudgetStartDay()}"></label><button class="btn btn-secondary" type="submit">Uložit den</button></form><p style="color:var(--muted); margin-top:10px;">Další období se bude tvořit automaticky od zvoleného dne.</p></div><div class="card" style="margin-top:16px;"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa období</h2><button class="btn btn-primary" data-action="show-create-period">Vytvořit další měsíc</button></div><div class="list" style="margin-top:12px;"><div class="list-item"><strong>Následující období</strong><div style="color:var(--muted); margin-top:6px;">${nextPeriod.name} · ${nextPeriod.start_date} → ${nextPeriod.end_date}</div></div>${state.periods.length ? state.periods.map((period) => `<div class="list-item"><strong>${period.name}</strong><div style="color:var(--muted); margin-top:6px;">${period.start_date} → ${period.end_date}</div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-period" data-id="${period.id}">Upravit</button><button class="btn btn-danger" data-action="delete-period" data-id="${period.id}">Smazat</button></div></div>`).join('') : '<div class="empty">Žádná období</div>'}</div></div></div>`;
 }
 
 function renderSidebar() {
@@ -754,6 +777,8 @@ function attachEvents() {
     if (!category) return;
     updateCategory(category.id, { active: category.active === false ? true : false });
   }));
+  document.querySelectorAll('[data-action="edit-period"]').forEach((btn) => btn.addEventListener('click', () => showPeriodModal(btn.dataset.id)));
+  document.querySelectorAll('[data-action="delete-period"]').forEach((btn) => btn.addEventListener('click', () => deletePeriod(btn.dataset.id)));
   document.getElementById('period-start-day-form')?.addEventListener('submit', (event) => {
     event.preventDefault();
     const nextStartDay = Number(document.getElementById('budget-start-day')?.value);
@@ -863,27 +888,42 @@ function showCategoryModal(categoryId = null) {
   });
 }
 
-function showPeriodModal() {
+function showPeriodModal(periodId = null) {
+  const period = state.periods.find((item) => item.id === periodId) || null;
   const nextPeriod = getNextMonthlyPeriodPayload();
+  const formData = period || nextPeriod;
   const form = `
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
-        <h3>Nové období</h3>
+        <h3>${period ? 'Upravit období' : 'Nové období'}</h3>
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <form id="period-form" class="form-grid" style="margin-top:12px;">
-        <label>Název<input name="name" required readonly value="${nextPeriod.name}"></label>
-        <label>Začátek<input name="start_date" type="date" required readonly value="${nextPeriod.start_date}"></label>
-        <label>Konec<input name="end_date" type="date" required readonly value="${nextPeriod.end_date}"></label>
-        <p style="color:var(--muted); margin:0;">Období se počítá automaticky podle nastaveného dne začátku měsíce.</p>
-        <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>Vytvořit</button>
+        <label>Název<input name="name" required ${period ? '' : 'readonly'} value="${formData.name}"></label>
+        <label>Začátek<input name="start_date" type="date" required ${period ? '' : 'readonly'} value="${formData.start_date}"></label>
+        <label>Konec<input name="end_date" type="date" required ${period ? '' : 'readonly'} value="${formData.end_date}"></label>
+        ${period ? '' : '<p style="color:var(--muted); margin:0;">Období se počítá automaticky podle nastaveného dne začátku měsíce.</p>'}
+        <div class="row">
+          <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${period ? 'Uložit' : 'Vytvořit'}</button>
+          ${period ? '<button class="btn btn-danger" type="button" id="delete-period-modal">Smazat období</button>' : ''}
+        </div>
       </form>
     </div>`;
   showModal(form);
   document.getElementById('close-modal').addEventListener('click', closeModal);
   document.getElementById('period-form').addEventListener('submit', (event) => {
     event.preventDefault();
-    createPeriod(nextPeriod);
+    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    payload.status = period?.status || 'active';
+    if (period) {
+      updatePeriod(period.id, payload);
+    } else {
+      createPeriod(nextPeriod);
+    }
+    closeModal();
+  });
+  document.getElementById('delete-period-modal')?.addEventListener('click', () => {
+    deletePeriod(period.id);
     closeModal();
   });
 }
