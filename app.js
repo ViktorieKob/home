@@ -473,6 +473,51 @@ async function createBudgetForCategoryInCurrentPeriod(category) {
   }
 }
 
+async function saveCategoryBudgetForCurrentPeriod(categoryId, baseBudget, manualAdjustment) {
+  const period = getCurrentPeriod();
+  const category = getCategoryById(categoryId);
+  if (!period?.id || !category?.id) {
+    state.status = { type: 'error', message: 'Nejprve vyber platné období a kategorii.' };
+    render();
+    return;
+  }
+
+  state.loading = true;
+  render();
+
+  try {
+    const existing = getPeriodBudgetRecord(category.id, period.id);
+    const rolloverAmount = existing
+      ? safeNumber(existing.rollover_amount)
+      : safeNumber(computeCategoryMetrics(category, period).rolloverAmount);
+    const totalAvailable = safeNumber(baseBudget) + safeNumber(rolloverAmount) + safeNumber(manualAdjustment);
+
+    if (existing?.id) {
+      await supabaseCall('PATCH', 'period_budgets', { id: `eq.${existing.id}` }, {
+        base_budget: safeNumber(baseBudget),
+        manual_adjustment: safeNumber(manualAdjustment),
+        total_available: totalAvailable,
+      });
+    } else {
+      await supabaseCall('POST', 'period_budgets', {}, {
+        period_id: period.id,
+        category_id: category.id,
+        base_budget: safeNumber(baseBudget),
+        rollover_amount: safeNumber(rolloverAmount),
+        manual_adjustment: safeNumber(manualAdjustment),
+        total_available: totalAvailable,
+      });
+    }
+
+    state.status = { type: 'success', message: `Rozpočet kategorie ${category.name} byl uložen.` };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
 async function cleanupDuplicatePersonalCategories() {
   if (!state.household?.id || !state.categories.length) return;
 
@@ -1806,9 +1851,10 @@ function attachEvents() {
   });
 }
 
-function showTransactionModal(transactionId = null) {
+function showTransactionModal(transactionId = null, defaults = {}) {
   const transaction = state.transactions.find((t) => t.id === transactionId) || null;
   const period = getCurrentPeriod();
+  const defaultType = defaults.type || 'expense';
   const categoryOptionsByType = (type, selectedId = '') => {
     const items = state.categories.filter((category) => category.active !== false && category.type === type);
     return ['<option value="">Bez kategorie</option>', ...items.map((category) => `<option value="${category.id}" ${selectedId === category.id ? 'selected' : ''}>${category.icon || '📦'} ${category.name}</option>`)]
@@ -1819,8 +1865,12 @@ function showTransactionModal(transactionId = null) {
     return ['<option value="">Bez podkategorie</option>', ...items.map((item) => `<option value="${item.id}" ${selectedId === item.id ? 'selected' : ''}>${item.icon || '•'} ${item.name}</option>`)]
       .join('');
   };
-  const selectedType = transaction?.type || 'expense';
-  const selectedCategoryId = transaction?.category_id || '';
+  const selectedType = transaction?.type || defaultType;
+  const selectedCategoryId = transaction?.category_id || defaults.category_id || '';
+  const selectedSubcategoryId = transaction?.subcategory_id || defaults.subcategory_id || '';
+  const selectedDate = transaction?.transaction_date || defaults.transaction_date || getToday();
+  const selectedPaidBy = transaction?.paid_by || defaults.paid_by || 'Společné';
+  const selectedNote = transaction?.note || defaults.note || '';
   const form = `
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
@@ -1830,11 +1880,11 @@ function showTransactionModal(transactionId = null) {
       <form id="transaction-form" class="form-grid" style="margin-top:12px;">
         <label>Typ<select name="type" id="transaction-type"><option value="expense" ${selectedType === 'expense' ? 'selected' : ''}>Výdaj</option><option value="income" ${selectedType === 'income' ? 'selected' : ''}>Příjem</option></select></label>
         <label>Částka<input name="amount" type="number" step="0.01" required value="${transaction?.amount || ''}"></label>
-        <label>Datum<input name="transaction_date" type="date" required value="${transaction?.transaction_date || getToday()}"></label>
+        <label>Datum<input name="transaction_date" type="date" required value="${selectedDate}"></label>
         <label>Kategorie<select name="category_id" id="transaction-category">${categoryOptionsByType(selectedType, selectedCategoryId)}</select></label>
-        <label id="subcategory-wrap" style="display:${selectedType === 'expense' ? 'flex' : 'none'};">Podkategorie<select name="subcategory_id" id="transaction-subcategory">${subcategoryOptions(selectedCategoryId, transaction?.subcategory_id || '')}</select></label>
-        <label>Osoba<select name="paid_by"><option value="Viki" ${transaction?.paid_by === 'Viki' ? 'selected' : ''}>Viki</option><option value="Káťa" ${transaction?.paid_by === 'Káťa' ? 'selected' : ''}>Káťa</option><option value="Společné" ${transaction?.paid_by === 'Společné' ? 'selected' : ''}>Společné</option></select></label>
-        <label>Poznámka<textarea name="note">${transaction?.note || ''}</textarea></label>
+        <label id="subcategory-wrap" style="display:${selectedType === 'expense' ? 'flex' : 'none'};">Podkategorie<select name="subcategory_id" id="transaction-subcategory">${subcategoryOptions(selectedCategoryId, selectedSubcategoryId)}</select></label>
+        <label>Osoba<select name="paid_by"><option value="Viki" ${selectedPaidBy === 'Viki' ? 'selected' : ''}>Viki</option><option value="Káťa" ${selectedPaidBy === 'Káťa' ? 'selected' : ''}>Káťa</option><option value="Společné" ${selectedPaidBy === 'Společné' ? 'selected' : ''}>Společné</option></select></label>
+        <label>Poznámka<textarea name="note">${selectedNote}</textarea></label>
         ${transaction ? '' : `
           <label style="display:flex; align-items:center; gap:8px; margin-top:4px;">
             <input type="checkbox" id="recurring-enabled"> Nastavit jako opakovanou transakci
@@ -2130,7 +2180,10 @@ function showPeriodModal(periodId = null) {
 function showCategoryDetailModal(categoryId) {
   const category = state.categories.find((c) => c.id === categoryId);
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
-  const transactions = state.transactions.filter((t) => t.category_id === categoryId && t.type === 'expense');
+  const periodBudget = period ? getPeriodBudgetRecord(categoryId, period.id) : null;
+  const transactions = state.transactions
+    .filter((t) => t.category_id === categoryId && t.type === 'expense' && (!period || t.period_id === period.id))
+    .sort((a, b) => new Date(b.transaction_date) - new Date(a.transaction_date));
   const metrics = period && category ? computeCategoryMetrics(category, period) : { expenses:0, baseBudget:0, rolloverAmount:0, manualAdjustment:0, totalAvailable:0, remaining:0, usagePercent:0 };
   const split = period && category ? computeCategoryPersonSplit(category, period.id, metrics.totalAvailable) : null;
   showModal(`
@@ -2140,20 +2193,61 @@ function showCategoryDetailModal(categoryId) {
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <div class="list" style="margin-top:12px;">
+        <div class="list-item">Období: ${period ? `${period.name} (${period.start_date} → ${period.end_date})` : 'Nevybrané období'}</div>
         <div class="list-item">Rozpočet období: ${formatCurrency(metrics.baseBudget || 0)}</div>
         <div class="list-item">Převedeno z minulého: ${formatCurrency(metrics.rolloverAmount || 0)}</div>
+        <div class="list-item">Ruční úprava: ${formatCurrency(metrics.manualAdjustment || 0)}</div>
         <div class="list-item">Celkem k dispozici: ${formatCurrency(metrics.totalAvailable)}</div>
         <div class="list-item">Vyčerpáno: ${formatCurrency(metrics.expenses)}</div>
         <div class="list-item">Zbývá: ${formatCurrency(metrics.remaining)}</div>
         ${split ? `<div class="list-item"><strong>Rozdělení dle osoby</strong><div style="margin-top:8px;">Viki: ${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)} · zbývá ${formatCurrency(split.vikiRemaining)}</div><div style="margin-top:6px;">Káťa: ${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)} · zbývá ${formatCurrency(split.kataRemaining)}</div></div>` : ''}
       </div>
+      ${period ? `
+        <div class="card" style="margin-top:12px;">
+          <h4>Upravit rozpočet období</h4>
+          <form id="category-period-budget-form" class="form-grid" style="margin-top:10px;">
+            <label>Základní rozpočet (Kč)
+              <input name="base_budget" type="number" step="0.01" min="0" required value="${safeNumber(periodBudget?.base_budget ?? metrics.baseBudget)}">
+            </label>
+            <label>Ruční úprava (Kč)
+              <input name="manual_adjustment" type="number" step="0.01" value="${safeNumber(periodBudget?.manual_adjustment ?? metrics.manualAdjustment)}">
+            </label>
+            <div class="row">
+              <button class="btn btn-primary" type="submit">Uložit rozpočet</button>
+              <button class="btn btn-secondary" type="button" id="category-detail-add-transaction">Přidat transakci</button>
+            </div>
+          </form>
+        </div>
+      ` : ''}
       <div class="card" style="margin-top:12px;">
-        <h4>Transakce</h4>
+        <h4>Transakce v období</h4>
         ${transactions.length ? transactions.map((t) => `<div class="list-item">${t.transaction_date} · ${formatCurrency(t.amount)} · ${getSubcategoryById(t.subcategory_id)?.name || 'Bez podkategorie'} · ${t.note || '—'}</div>`).join('') : '<div class="empty">Žádné výdaje</div>'}
       </div>
     </div>
   `);
   document.getElementById('close-modal').addEventListener('click', closeModal);
+  document.getElementById('category-period-budget-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const baseBudget = safeNumber(payload.base_budget);
+    const manualAdjustment = Number(payload.manual_adjustment || 0);
+    if (baseBudget < 0) {
+      state.status = { type: 'error', message: 'Základní rozpočet musí být alespoň 0 Kč.' };
+      render();
+      return;
+    }
+    closeModal();
+    await saveCategoryBudgetForCurrentPeriod(categoryId, baseBudget, manualAdjustment);
+  });
+  document.getElementById('category-detail-add-transaction')?.addEventListener('click', () => {
+    closeModal();
+    showTransactionModal(null, {
+      type: 'expense',
+      category_id: categoryId,
+      transaction_date: getToday(),
+      paid_by: 'Společné',
+    });
+  });
 }
 
 window.addEventListener('online', () => {
