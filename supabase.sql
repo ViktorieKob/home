@@ -83,46 +83,110 @@ alter table categories enable row level security;
 alter table period_budgets enable row level security;
 alter table transactions enable row level security;
 
-create policy if not exists households_select on households
+drop policy if exists households_select on households;
+create policy households_select on households
   for select using (exists (select 1 from household_members hm where hm.household_id = households.id and hm.user_id = auth.uid()));
-create policy if not exists households_insert on households
+drop policy if exists households_insert on households;
+create policy households_insert on households
   for insert with check (true);
-create policy if not exists households_update on households
+drop policy if exists households_update on households;
+create policy households_update on households
   for update using (exists (select 1 from household_members hm where hm.household_id = households.id and hm.user_id = auth.uid()));
 
-create policy if not exists household_members_select on household_members
+drop policy if exists household_members_select on household_members;
+create policy household_members_select on household_members
   for select using (user_id = auth.uid());
-create policy if not exists household_members_insert on household_members
+drop policy if exists household_members_insert on household_members;
+create policy household_members_insert on household_members
   for insert with check (user_id = auth.uid());
-create policy if not exists household_members_update on household_members
+drop policy if exists household_members_update on household_members;
+create policy household_members_update on household_members
   for update using (user_id = auth.uid());
 
-create policy if not exists budget_periods_select on budget_periods
+drop policy if exists budget_periods_select on budget_periods;
+create policy budget_periods_select on budget_periods
   for select using (exists (select 1 from household_members hm where hm.household_id = budget_periods.household_id and hm.user_id = auth.uid()));
-create policy if not exists budget_periods_insert on budget_periods
+drop policy if exists budget_periods_insert on budget_periods;
+create policy budget_periods_insert on budget_periods
   for insert with check (exists (select 1 from household_members hm where hm.household_id = budget_periods.household_id and hm.user_id = auth.uid()));
-create policy if not exists budget_periods_update on budget_periods
+drop policy if exists budget_periods_update on budget_periods;
+create policy budget_periods_update on budget_periods
   for update using (exists (select 1 from household_members hm where hm.household_id = budget_periods.household_id and hm.user_id = auth.uid()));
 
-create policy if not exists categories_select on categories
+drop policy if exists categories_select on categories;
+create policy categories_select on categories
   for select using (exists (select 1 from household_members hm where hm.household_id = categories.household_id and hm.user_id = auth.uid()));
-create policy if not exists categories_insert on categories
+drop policy if exists categories_insert on categories;
+create policy categories_insert on categories
   for insert with check (exists (select 1 from household_members hm where hm.household_id = categories.household_id and hm.user_id = auth.uid()));
-create policy if not exists categories_update on categories
+drop policy if exists categories_update on categories;
+create policy categories_update on categories
   for update using (exists (select 1 from household_members hm where hm.household_id = categories.household_id and hm.user_id = auth.uid()));
 
-create policy if not exists period_budgets_select on period_budgets
+drop policy if exists period_budgets_select on period_budgets;
+create policy period_budgets_select on period_budgets
   for select using (exists (select 1 from household_members hm where hm.household_id = (select household_id from budget_periods bp where bp.id = period_budgets.period_id) and hm.user_id = auth.uid()));
-create policy if not exists period_budgets_insert on period_budgets
+drop policy if exists period_budgets_insert on period_budgets;
+create policy period_budgets_insert on period_budgets
   for insert with check (exists (select 1 from household_members hm where hm.household_id = (select household_id from budget_periods bp where bp.id = period_budgets.period_id) and hm.user_id = auth.uid()));
-create policy if not exists period_budgets_update on period_budgets
+drop policy if exists period_budgets_update on period_budgets;
+create policy period_budgets_update on period_budgets
   for update using (exists (select 1 from household_members hm where hm.household_id = (select household_id from budget_periods bp where bp.id = period_budgets.period_id) and hm.user_id = auth.uid()));
 
-create policy if not exists transactions_select on transactions
+drop policy if exists transactions_select on transactions;
+create policy transactions_select on transactions
   for select using (exists (select 1 from household_members hm where hm.household_id = transactions.household_id and hm.user_id = auth.uid()));
-create policy if not exists transactions_insert on transactions
+drop policy if exists transactions_insert on transactions;
+create policy transactions_insert on transactions
   for insert with check (exists (select 1 from household_members hm where hm.household_id = transactions.household_id and hm.user_id = auth.uid()));
-create policy if not exists transactions_update on transactions
+drop policy if exists transactions_update on transactions;
+create policy transactions_update on transactions
   for update using (exists (select 1 from household_members hm where hm.household_id = transactions.household_id and hm.user_id = auth.uid()));
-create policy if not exists transactions_delete on transactions
+drop policy if exists transactions_delete on transactions;
+create policy transactions_delete on transactions
   for delete using (exists (select 1 from household_members hm where hm.household_id = transactions.household_id and hm.user_id = auth.uid()));
+
+-- Public/no-auth mode policies for this single-page app.
+-- Keep these only if you intentionally run the app without Supabase Auth.
+drop policy if exists households_public_select on households;
+create policy households_public_select on households
+  for select using (true);
+drop policy if exists households_public_insert on households;
+create policy households_public_insert on households
+  for insert with check (true);
+drop policy if exists households_public_update on households;
+create policy households_public_update on households
+  for update using (true) with check (true);
+
+drop policy if exists budget_periods_public_select on budget_periods;
+create policy budget_periods_public_select on budget_periods
+  for select using (true);
+drop policy if exists budget_periods_public_insert on budget_periods;
+create policy budget_periods_public_insert on budget_periods
+  for insert with check (true);
+drop policy if exists budget_periods_public_update on budget_periods;
+create policy budget_periods_public_update on budget_periods
+  for update using (true) with check (true);
+
+drop policy if exists categories_public_select on categories;
+create policy categories_public_select on categories
+  for select using (true);
+drop policy if exists categories_public_insert on categories;
+create policy categories_public_insert on categories
+  for insert with check (true);
+drop policy if exists categories_public_update on categories;
+create policy categories_public_update on categories
+  for update using (true) with check (true);
+
+drop policy if exists transactions_public_select on transactions;
+create policy transactions_public_select on transactions
+  for select using (true);
+drop policy if exists transactions_public_insert on transactions;
+create policy transactions_public_insert on transactions
+  for insert with check (true);
+drop policy if exists transactions_public_update on transactions;
+create policy transactions_public_update on transactions
+  for update using (true) with check (true);
+drop policy if exists transactions_public_delete on transactions;
+create policy transactions_public_delete on transactions
+  for delete using (true);

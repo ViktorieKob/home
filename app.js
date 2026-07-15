@@ -36,6 +36,19 @@ function getToday() {
 function generateId() {
   return Math.random().toString(36).substr(2, 9);
 }
+function formatApiErrorMessage(error) {
+  const message = String(error?.message || error || 'Neznámá chyba');
+  if (message.includes('row-level security policy')) {
+    return 'Přístup do databáze byl zablokován pravidly RLS. Spusťte SQL politiky ze souboru supabase.sql v Supabase SQL editoru.';
+  }
+  if (message.includes('JWT') || message.includes('Invalid token') || message.includes('401')) {
+    return 'Neplatný nebo expirovaný Supabase klíč. Zkontrolujte SUPABASE_ANON_KEY.';
+  }
+  if (message.includes('PGRST204') || message.includes('Could not find the')) {
+    return 'Nesoulad mezi app.js a databázovým schématem. Zkontrolujte sloupce v supabase.sql.';
+  }
+  return message;
+}
 function getPeriodById(id) {
   return state.periods.find((p) => p.id === id) || null;
 }
@@ -84,23 +97,25 @@ function calculatePeriodSummary(period) {
 
 // Supabase API calls using fetch
 async function supabaseCall(method, table, filters = {}, data = null) {
-  let url = `${SUPABASE_URL}/rest/v1/${table}`;
-  const params = new URLSearchParams();
-  
+  const url = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
+
   if (method === 'GET') {
-    Object.entries(filters).forEach(([key, value]) => {
-      if (Array.isArray(value)) {
-        params.append(key, value.join(','));
-      } else if (value !== undefined && value !== null && value !== 'all') {
-        params.append(key, value);
-      }
-    });
+    url.searchParams.set('select', '*');
   }
-  
-  if (params.toString()) {
-    url += '?' + params.toString();
-  }
-  
+
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === 'all') {
+      return;
+    }
+    if (Array.isArray(value)) {
+      url.searchParams.set(key, value.join(','));
+    } else {
+      url.searchParams.set(key, value);
+    }
+  });
+
+  url.searchParams.set('apikey', SUPABASE_ANON_KEY);
+
   const options = {
     method,
     mode: 'cors',
@@ -114,19 +129,17 @@ async function supabaseCall(method, table, filters = {}, data = null) {
   if (method !== 'GET' && data) {
     options.body = JSON.stringify(data);
   }
-  
-  if (params.toString()) {
-    url += '?' + params.toString() + `&apikey=${encodeURIComponent(SUPABASE_ANON_KEY)}`;
-  } else {
-    url += `?apikey=${encodeURIComponent(SUPABASE_ANON_KEY)}`;
-  }
-  
-  const response = await fetch(url, options);
+
+  const response = await fetch(url.toString(), options);
   if (!response.ok) {
     const error = await response.text();
     throw new Error(error || `HTTP ${response.status}`);
   }
-  return response.json();
+  if (response.status === 204) {
+    return null;
+  }
+  const responseText = await response.text();
+  return responseText ? JSON.parse(responseText) : null;
 }
 
 async function ensureDefaultHousehold() {
@@ -143,7 +156,7 @@ async function ensureDefaultHousehold() {
       state.household = newHouseholds[0];
     }
   } catch (error) {
-    state.status = { type: 'error', message: 'Chyba při vytváření domácnosti: ' + error.message };
+    state.status = { type: 'error', message: 'Chyba při vytváření domácnosti: ' + formatApiErrorMessage(error) };
   }
 }
 
@@ -171,7 +184,7 @@ async function loadAllData() {
     }
     state.status = null;
   } catch (error) {
-    state.status = { type: 'error', message: 'Chyba při načítání: ' + error.message };
+    state.status = { type: 'error', message: 'Chyba při načítání: ' + formatApiErrorMessage(error) };
   }
   state.loading = false;
   render();
@@ -200,7 +213,7 @@ async function insertTransaction(formData) {
     state.status = { type: 'success', message: 'Transakce uložena.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: error.message };
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
     state.loading = false;
     render();
   }
@@ -218,11 +231,11 @@ async function updateTransaction(id, payload) {
   };
   
   try {
-    await supabaseCall('PATCH', `transactions?id=eq.${id}`, {}, nextPayload);
+    await supabaseCall('PATCH', 'transactions', { id: `eq.${id}` }, nextPayload);
     state.status = { type: 'success', message: 'Transakce upravena.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: error.message };
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
     state.loading = false;
     render();
   }
@@ -234,11 +247,11 @@ async function deleteTransaction(id) {
   render();
   
   try {
-    await supabaseCall('DELETE', `transactions?id=eq.${id}`);
+    await supabaseCall('DELETE', 'transactions', { id: `eq.${id}` });
     state.status = { type: 'success', message: 'Transakce smazána.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: error.message };
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
     state.loading = false;
     render();
   }
@@ -258,7 +271,7 @@ async function createPeriod(payload) {
     state.status = { type: 'success', message: 'Období vytvořeno.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: error.message };
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
     state.loading = false;
     render();
   }
@@ -270,18 +283,19 @@ async function createCategory(payload) {
   
   const nextPayload = {
     ...payload,
-    household_id: state.household.id || generateId(),
-    id: generateId(),
-    created_at: getToday(),
+    household_id: state.household.id,
     active: true,
   };
+  if (!nextPayload.household_id) {
+    throw new Error('Neexistující domácnost. Prosím obnovte stránku.');
+  }
   
   try {
     await supabaseCall('POST', 'categories', {}, nextPayload);
     state.status = { type: 'success', message: 'Kategorie vytvořena.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: error.message };
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
     state.loading = false;
     render();
   }
@@ -292,11 +306,11 @@ async function updateCategory(id, payload) {
   render();
   
   try {
-    await supabaseCall('PATCH', `categories?id=eq.${id}`, {}, payload);
+    await supabaseCall('PATCH', 'categories', { id: `eq.${id}` }, payload);
     state.status = { type: 'success', message: 'Kategorie upravena.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: error.message };
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
     state.loading = false;
     render();
   }
@@ -307,11 +321,11 @@ async function updatePeriod(id, payload) {
   render();
   
   try {
-    await supabaseCall('PATCH', `budget_periods?id=eq.${id}`, {}, payload);
+    await supabaseCall('PATCH', 'budget_periods', { id: `eq.${id}` }, payload);
     state.status = { type: 'success', message: 'Období upraveno.' };
     await loadAllData();
   } catch (error) {
-    state.status = { type: 'error', message: error.message };
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
     state.loading = false;
     render();
   }
@@ -598,9 +612,10 @@ function showCategoryModal(categoryId = null) {
     const formData = new FormData(event.currentTarget);
     const payload = Object.fromEntries(formData.entries());
     payload.default_budget = Number(payload.default_budget);
-    payload.rollover_amount = 0;
-    payload.manual_adjustment = 0;
-    payload.active = true;
+    if (!category) {
+      payload.active = true;
+      payload.type = 'expense';
+    }
     if (category) {
       updateCategory(category.id, payload);
     } else {
