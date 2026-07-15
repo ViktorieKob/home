@@ -305,13 +305,16 @@ function computeCategoryMetrics(category, period) {
   return { expenses, baseBudget, rolloverAmount, manualAdjustment, totalAvailable, remaining, usagePercent, baseUsagePercent };
 }
 
-function computeCategoryPersonSplit(categoryId, periodId, totalBudget) {
+function computeCategoryPersonSplit(category, periodId, totalBudget) {
+  if (!category?.split_by_person) {
+    return null;
+  }
   const safeBudget = safeNumber(totalBudget);
   const perPersonBudget = safeBudget / 2;
   const personSpend = { viki: 0, kata: 0 };
 
   state.transactions
-    .filter((transaction) => transaction.period_id === periodId && transaction.category_id === categoryId && transaction.type === 'expense')
+    .filter((transaction) => transaction.period_id === periodId && transaction.category_id === category.id && transaction.type === 'expense')
     .forEach((transaction) => {
       const amount = safeNumber(transaction.amount);
       if (transaction.paid_by === 'Viki') {
@@ -1272,7 +1275,7 @@ function renderDashboard() {
           <div class="list">
             ${state.categories.filter((c) => c.active !== false).length ? state.categories.filter((c) => c.active !== false).map((category) => {
               const metrics = computeCategoryMetrics(category, period);
-              const split = period ? computeCategoryPersonSplit(category.id, period.id, metrics.totalAvailable) : null;
+              const split = period ? computeCategoryPersonSplit(category, period.id, metrics.totalAvailable) : null;
               const pct = Math.min(metrics.usagePercent, 100);
               const className = pct >= 100 ? 'progress-danger' : pct >= 90 ? 'progress-warn' : 'progress-good';
               return `
@@ -1379,7 +1382,7 @@ function renderBudgetManagement() {
   return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat nový rozpočet</button></div><p style="color:var(--muted); margin-top:8px;">Každou kategorii lze upravit, vypnout nebo smazat. Níže vidíš i průběh čerpání rozpočtu v aktuálním období.</p><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => {
     const metrics = period ? computeCategoryMetrics(category, period) : { expenses: 0, totalAvailable: 0 };
     const percent = metrics.totalAvailable > 0 ? Math.min(140, Math.round((metrics.expenses / metrics.totalAvailable) * 100)) : 0;
-    return `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Fixně: ${formatCurrency(category.default_budget)} · Procento: ${safeNumber(category.allocation_percent)} % (jen když fixní=0)</div><div class="budget-compare" style="margin-top:8px;"><div class="budget-compare-track"><span style="width:${Math.max(4, Math.min(percent, 100))}%"></span></div><div class="budget-compare-label">Vyčerpáno ${formatCurrency(metrics.expenses)} z ${formatCurrency(metrics.totalAvailable)}</div></div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button><button class="btn btn-danger" data-action="delete-category" data-id="${category.id}">Smazat</button></div></div>`;
+    return `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Fixně: ${formatCurrency(category.default_budget)} · Procento: ${safeNumber(category.allocation_percent)} % (jen když fixní=0) · Dělit mezi osoby: ${category.split_by_person ? 'ANO' : 'NE'}</div><div class="budget-compare" style="margin-top:8px;"><div class="budget-compare-track"><span style="width:${Math.max(4, Math.min(percent, 100))}%"></span></div><div class="budget-compare-label">Vyčerpáno ${formatCurrency(metrics.expenses)} z ${formatCurrency(metrics.totalAvailable)}</div></div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button><button class="btn btn-danger" data-action="delete-category" data-id="${category.id}">Smazat</button></div></div>`;
   }).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
 }
 
@@ -1767,6 +1770,10 @@ function showCategoryModal(categoryId = null) {
         <label>Ikona<select name="icon" id="category-icon">${getCategoryIconOptions(selectedIcon)}</select></label>
         <label>Výchozí rozpočet<input name="default_budget" type="number" step="0.01" value="${category?.default_budget || 0}"></label>
         <label>Procento z potvrzených výplat (0-100)<input name="allocation_percent" type="number" step="0.01" min="0" max="100" value="${category?.allocation_percent || 0}"></label>
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input name="split_by_person" type="checkbox" ${category?.split_by_person ? 'checked' : ''}>
+          Dělit rozpočet na polovinu podle osoby (Viki/Káťa)
+        </label>
         <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${category ? 'Uložit' : 'Přidat'}</button>
       </form>
     </div>`;
@@ -1791,6 +1798,7 @@ function showCategoryModal(categoryId = null) {
     const payload = Object.fromEntries(formData.entries());
     payload.default_budget = Number(payload.default_budget);
     payload.allocation_percent = Number(payload.allocation_percent);
+    payload.split_by_person = formData.get('split_by_person') === 'on';
     if (!category) {
       payload.active = true;
       payload.type = 'expense';
@@ -1853,7 +1861,7 @@ function showCategoryDetailModal(categoryId) {
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
   const transactions = state.transactions.filter((t) => t.category_id === categoryId && t.type === 'expense');
   const metrics = period && category ? computeCategoryMetrics(category, period) : { expenses:0, baseBudget:0, rolloverAmount:0, manualAdjustment:0, totalAvailable:0, remaining:0, usagePercent:0 };
-  const split = period && category ? computeCategoryPersonSplit(category.id, period.id, metrics.totalAvailable) : null;
+  const split = period && category ? computeCategoryPersonSplit(category, period.id, metrics.totalAvailable) : null;
   showModal(`
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
