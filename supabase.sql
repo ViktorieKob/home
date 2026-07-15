@@ -4,8 +4,11 @@ create table if not exists households (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   budget_start_day integer not null default 1 check (budget_start_day between 1 and 31),
+  initial_balance numeric(12,2) not null default 0,
   created_at timestamptz not null default now()
 );
+
+alter table households add column if not exists initial_balance numeric(12,2) not null default 0;
 
 create table if not exists household_members (
   household_id uuid not null references households(id) on delete cascade,
@@ -23,9 +26,14 @@ create table if not exists budget_periods (
   start_date date not null,
   end_date date not null,
   status text not null default 'active' check (status in ('active','closed','future')),
+  opening_balance_override numeric(12,2),
+  allocation_confirmed boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table budget_periods add column if not exists opening_balance_override numeric(12,2);
+alter table budget_periods add column if not exists allocation_confirmed boolean not null default false;
 
 create table if not exists categories (
   id uuid primary key default gen_random_uuid(),
@@ -69,12 +77,32 @@ create table if not exists transactions (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists recurring_transactions (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null references households(id) on delete cascade,
+  type text not null check (type in ('income','expense')),
+  amount numeric(12,2) not null check (amount > 0),
+  category_id uuid references categories(id) on delete set null,
+  paid_by text not null check (paid_by in ('Viki','Káťa','Společné')),
+  note text,
+  frequency text not null check (frequency in ('weekly','monthly','semiannual','yearly')),
+  start_date date not null,
+  next_run_date date not null,
+  day_overflow_strategy text not null default 'last_day' check (day_overflow_strategy in ('last_day','custom_day')),
+  custom_day integer check (custom_day between 1 and 31),
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create index if not exists idx_budget_periods_household on budget_periods(household_id);
 create index if not exists idx_categories_household on categories(household_id);
 create index if not exists idx_period_budgets_period on period_budgets(period_id);
 create index if not exists idx_transactions_household on transactions(household_id);
 create index if not exists idx_transactions_period on transactions(period_id);
 create index if not exists idx_transactions_date on transactions(transaction_date);
+create index if not exists idx_recurring_transactions_household on recurring_transactions(household_id);
+create index if not exists idx_recurring_transactions_next_run on recurring_transactions(next_run_date);
 
 alter table households enable row level security;
 alter table household_members enable row level security;
@@ -82,6 +110,7 @@ alter table budget_periods enable row level security;
 alter table categories enable row level security;
 alter table period_budgets enable row level security;
 alter table transactions enable row level security;
+alter table recurring_transactions enable row level security;
 
 drop policy if exists households_select on households;
 create policy households_select on households
@@ -146,6 +175,19 @@ drop policy if exists transactions_delete on transactions;
 create policy transactions_delete on transactions
   for delete using (exists (select 1 from household_members hm where hm.household_id = transactions.household_id and hm.user_id = auth.uid()));
 
+drop policy if exists recurring_transactions_select on recurring_transactions;
+create policy recurring_transactions_select on recurring_transactions
+  for select using (exists (select 1 from household_members hm where hm.household_id = recurring_transactions.household_id and hm.user_id = auth.uid()));
+drop policy if exists recurring_transactions_insert on recurring_transactions;
+create policy recurring_transactions_insert on recurring_transactions
+  for insert with check (exists (select 1 from household_members hm where hm.household_id = recurring_transactions.household_id and hm.user_id = auth.uid()));
+drop policy if exists recurring_transactions_update on recurring_transactions;
+create policy recurring_transactions_update on recurring_transactions
+  for update using (exists (select 1 from household_members hm where hm.household_id = recurring_transactions.household_id and hm.user_id = auth.uid()));
+drop policy if exists recurring_transactions_delete on recurring_transactions;
+create policy recurring_transactions_delete on recurring_transactions
+  for delete using (exists (select 1 from household_members hm where hm.household_id = recurring_transactions.household_id and hm.user_id = auth.uid()));
+
 -- Public/no-auth mode policies for this single-page app.
 -- Keep these only if you intentionally run the app without Supabase Auth.
 drop policy if exists households_public_select on households;
@@ -205,4 +247,17 @@ create policy transactions_public_update on transactions
   for update using (true) with check (true);
 drop policy if exists transactions_public_delete on transactions;
 create policy transactions_public_delete on transactions
+  for delete using (true);
+
+drop policy if exists recurring_transactions_public_select on recurring_transactions;
+create policy recurring_transactions_public_select on recurring_transactions
+  for select using (true);
+drop policy if exists recurring_transactions_public_insert on recurring_transactions;
+create policy recurring_transactions_public_insert on recurring_transactions
+  for insert with check (true);
+drop policy if exists recurring_transactions_public_update on recurring_transactions;
+create policy recurring_transactions_public_update on recurring_transactions
+  for update using (true) with check (true);
+drop policy if exists recurring_transactions_public_delete on recurring_transactions;
+create policy recurring_transactions_public_delete on recurring_transactions
   for delete using (true);
