@@ -49,9 +49,7 @@ const PERSONAL_BUDGETS = [
   { name: 'Osobní (Káťa)', icon: '🧑', amount: 4000 },
 ];
 const DEFAULT_CATEGORY_LIBRARY = [
-  { name: 'Úvěr 1 (Káťa)', icon: '🏦', type: 'expense', default_budget: 6596 },
-  { name: 'Úvěr 2 (Káťa)', icon: '🏦', type: 'expense', default_budget: 1485 },
-  { name: 'Úvěr 3 (Káťa)', icon: '🏦', type: 'expense', default_budget: 2188 },
+  { name: 'Úvěr (Káťa)', icon: '🏦', type: 'expense', default_budget: 10269 },
   { name: 'Pojištění L (Káťa)', icon: '🛡️', type: 'expense', default_budget: 310 },
   { name: 'Telefon O2 (Káťa)', icon: '📱', type: 'expense', default_budget: 700 },
   { name: 'Drogerie (Káťa)', icon: '🧴', type: 'expense', default_budget: 2000 },
@@ -84,9 +82,7 @@ const DEFAULT_SUBCATEGORY_LIBRARY = {
   'Pojistky auta (Viki)': ['Modrá', 'Černá'],
   'Jídlo psi (Viki)': ['Meggie', 'Džejna'],
   'Příjem': ['Veru K.', 'Veru G.', 'Ostatní'],
-  'Úvěr 1 (Káťa)': ['Splátka'],
-  'Úvěr 2 (Káťa)': ['Splátka'],
-  'Úvěr 3 (Káťa)': ['Splátka'],
+  'Úvěr (Káťa)': ['Úvěr 1', 'Úvěr 2', 'Úvěr 3'],
 };
 const DEFAULT_TRANSFER_PLAN = {
   kata_loan_1: 6596,
@@ -1547,8 +1543,17 @@ async function ensureDefaultCategoryLibrary() {
     if (category.type !== 'expense') continue;
     const key = normalize(category.name);
     if (templateKeys.has(key)) continue;
-    if (category.active === false) continue;
-    await supabaseCall('PATCH', 'categories', { id: `eq.${category.id}` }, { active: false });
+
+    const hasTransactions = state.transactions.some((transaction) => transaction.category_id === category.id);
+    const hasBudgets = state.periodBudgets.some((budget) => budget.category_id === category.id);
+    if (!hasTransactions && !hasBudgets) {
+      await supabaseCall('DELETE', 'categories', { id: `eq.${category.id}` });
+      continue;
+    }
+
+    if (category.active !== false) {
+      await supabaseCall('PATCH', 'categories', { id: `eq.${category.id}` }, { active: false });
+    }
   }
 }
 
@@ -2627,7 +2632,7 @@ function renderSettings() {
           </div>
         </div>
         <div class="list" style="margin-top:12px;">
-          ${state.categories.length ? state.categories.map((category) => {
+          ${state.categories.filter((category) => category.active !== false).length ? state.categories.filter((category) => category.active !== false).map((category) => {
             const subcats = getSubcategoriesForCategory(category.id);
             return `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Typ: ${category.type === 'income' ? 'Příjem' : 'Výdaj'} · Podkategorií: ${subcats.length}</div>${subcats.length ? `<div class="row" style="margin-top:8px;">${subcats.map((subcategory) => `<span class="badge badge-success" style="display:inline-flex; align-items:center; gap:8px;">${subcategory.icon || '•'} ${subcategory.name}<button class="btn btn-danger" style="padding:3px 8px;" data-action="delete-subcategory" data-id="${subcategory.id}">x</button></span>`).join('')}</div>` : ''}</div>`;
           }).join('') : '<div class="empty">Zatím žádné kategorie</div>'}
