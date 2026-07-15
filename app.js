@@ -56,7 +56,6 @@ const DEFAULT_CATEGORY_LIBRARY = [
   { name: 'Předplatné', icon: '📲', type: 'expense' },
   { name: 'Jídlo v práci', icon: '🍱', type: 'expense', split_mode: 'custom', split_by_person: true, split_viki_amount: 0, split_kata_amount: 0 },
   { name: 'Úvěr', icon: '🏦', type: 'expense' },
-  { name: 'Další', icon: '📦', type: 'expense' },
   { name: 'Výplata Káťa', icon: '💼', type: 'income' },
   { name: 'Výplata Viki', icon: '💼', type: 'income' },
   { name: 'Příjem', icon: '💰', type: 'income' },
@@ -510,6 +509,7 @@ async function cleanupDuplicatePersonalCategories() {
 
 async function ensureDefaultCategoryLibrary() {
   if (!state.household?.id) return;
+  if (state.categories.length) return;
   const normalize = (value) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
   const existingByName = new Map(state.categories.map((category) => [normalize(category.name), category]));
 
@@ -539,6 +539,7 @@ async function ensureDefaultSubcategoryLibrary() {
     household_id: `eq.${state.household.id}`,
     order: 'name.asc',
   });
+  if ((existing || []).length) return;
   const existingKeys = new Set((existing || []).map((item) => `${item.category_id}::${String(item.name).toLowerCase()}`));
 
   for (const [categoryName, names] of Object.entries(DEFAULT_SUBCATEGORY_LIBRARY)) {
@@ -756,7 +757,10 @@ async function loadAllData() {
       state.transactions = await supabaseCall('GET', 'transactions', { household_id: `eq.${householdId}`, order: 'transaction_date.desc' });
     }
 
-    if (!state.periods.some((period) => period.id === state.currentPeriodId)) {
+    const todayPeriod = getPeriodByDate(getToday());
+    if (todayPeriod?.id) {
+      state.currentPeriodId = todayPeriod.id;
+    } else if (!state.periods.some((period) => period.id === state.currentPeriodId)) {
       state.currentPeriodId = state.periods[0]?.id || null;
     }
     if (!state.currentPeriodId && state.periods.length) {
@@ -977,19 +981,32 @@ async function deleteCategory(id) {
   render();
 
   try {
+    const categorySubcategories = getSubcategoriesForCategory(id);
+    if (categorySubcategories.length) {
+      const subcategoryIds = categorySubcategories.map((item) => item.id).join(',');
+      await supabaseCall('PATCH', 'transactions', {
+        household_id: `eq.${state.household.id}`,
+        subcategory_id: `in.(${subcategoryIds})`,
+      }, { subcategory_id: null });
+      await supabaseCall('DELETE', 'subcategories', { category_id: `eq.${id}` });
+    }
+
+    await supabaseCall('PATCH', 'transactions', {
+      household_id: `eq.${state.household.id}`,
+      category_id: `eq.${id}`,
+    }, { category_id: null, subcategory_id: null });
+    await supabaseCall('PATCH', 'recurring_transactions', {
+      household_id: `eq.${state.household.id}`,
+      category_id: `eq.${id}`,
+    }, { category_id: null });
+    await supabaseCall('DELETE', 'period_budgets', { category_id: `eq.${id}` });
     await supabaseCall('DELETE', 'categories', { id: `eq.${id}` });
     state.status = { type: 'success', message: 'Kategorie byla smazána.' };
     await loadAllData();
   } catch (error) {
-    try {
-      await supabaseCall('PATCH', 'categories', { id: `eq.${id}` }, { active: false });
-      state.status = { type: 'info', message: 'Kategorie nešla fyzicky smazat, byla deaktivována.' };
-      await loadAllData();
-    } catch {
-      state.status = { type: 'error', message: formatApiErrorMessage(error) };
-      state.loading = false;
-      render();
-    }
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
   }
 }
 
@@ -2067,13 +2084,13 @@ function showPeriodModal(periodId = null) {
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <form id="period-form" class="form-grid" style="margin-top:12px;">
-        <label>Název<input name="name" required ${period ? '' : 'readonly'} value="${formData.name}"></label>
-        <label>Začátek<input name="start_date" type="date" required ${period ? '' : 'readonly'} value="${formData.start_date}"></label>
-        <label>Konec<input name="end_date" type="date" required ${period ? '' : 'readonly'} value="${formData.end_date}"></label>
+        <label>Název<input name="name" required value="${formData.name}"></label>
+        <label>Začátek<input name="start_date" type="date" required value="${formData.start_date}"></label>
+        <label>Konec<input name="end_date" type="date" required value="${formData.end_date}"></label>
         <label>Přepsat počáteční zůstatek období (volitelné)
           <input name="opening_balance_override" type="number" step="0.01" placeholder="Použije se vypočtený" value="${period?.opening_balance_override ?? ''}">
         </label>
-        ${period ? '' : '<p style="color:var(--muted); margin:0;">Období se počítá automaticky podle nastaveného dne začátku měsíce.</p>'}
+        ${period ? '' : '<p style="color:var(--muted); margin:0;">Můžeš vytvořit i zpětné nebo vlastní období.</p>'}
         <div class="row">
           <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${period ? 'Uložit' : 'Vytvořit'}</button>
           ${period ? '<button class="btn btn-danger" type="button" id="delete-period-modal">Smazat období</button>' : ''}
@@ -2085,12 +2102,22 @@ function showPeriodModal(periodId = null) {
   document.getElementById('period-form').addEventListener('submit', (event) => {
     event.preventDefault();
     const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    if (!payload.name?.trim()) {
+      state.status = { type: 'error', message: 'Název období je povinný.' };
+      render();
+      return;
+    }
+    if (!payload.start_date || !payload.end_date || payload.start_date > payload.end_date) {
+      state.status = { type: 'error', message: 'Datum začátku musí být menší nebo rovno datu konce.' };
+      render();
+      return;
+    }
     payload.opening_balance_override = payload.opening_balance_override === '' ? null : Number(payload.opening_balance_override);
     payload.status = period?.status || 'active';
     if (period) {
       updatePeriod(period.id, payload);
     } else {
-      createPeriod(nextPeriod);
+      createPeriod(payload);
     }
     closeModal();
   });
