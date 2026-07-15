@@ -45,6 +45,9 @@ create table if not exists categories (
   default_budget numeric(12,2) not null default 0 check (default_budget >= 0),
   allocation_percent numeric(5,2) not null default 0 check (allocation_percent between 0 and 100),
   split_by_person boolean not null default false,
+  split_mode text not null default 'none' check (split_mode in ('none','half','custom')),
+  split_viki_amount numeric(12,2) not null default 0 check (split_viki_amount >= 0),
+  split_kata_amount numeric(12,2) not null default 0 check (split_kata_amount >= 0),
   rollover_mode text not null default 'none' check (rollover_mode in ('none','positive','both')),
   active boolean not null default true,
   created_at timestamptz not null default now(),
@@ -53,6 +56,21 @@ create table if not exists categories (
 
 alter table categories add column if not exists allocation_percent numeric(5,2) not null default 0;
 alter table categories add column if not exists split_by_person boolean not null default false;
+alter table categories add column if not exists split_mode text not null default 'none';
+alter table categories add column if not exists split_viki_amount numeric(12,2) not null default 0;
+alter table categories add column if not exists split_kata_amount numeric(12,2) not null default 0;
+
+create table if not exists subcategories (
+  id uuid primary key default gen_random_uuid(),
+  household_id uuid not null references households(id) on delete cascade,
+  category_id uuid not null references categories(id) on delete cascade,
+  name text not null,
+  icon text default '•',
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(category_id, name)
+);
 
 create table if not exists period_budgets (
   id uuid primary key default gen_random_uuid(),
@@ -74,6 +92,7 @@ create table if not exists transactions (
   type text not null check (type in ('income','expense')),
   amount numeric(12,2) not null check (amount > 0),
   category_id uuid references categories(id) on delete set null,
+  subcategory_id uuid references subcategories(id) on delete set null,
   paid_by text not null check (paid_by in ('Viki','Káťa','Společné')),
   transaction_date date not null,
   note text,
@@ -81,6 +100,8 @@ create table if not exists transactions (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table transactions add column if not exists subcategory_id uuid references subcategories(id) on delete set null;
 
 create table if not exists recurring_transactions (
   id uuid primary key default gen_random_uuid(),
@@ -102,9 +123,11 @@ create table if not exists recurring_transactions (
 
 create index if not exists idx_budget_periods_household on budget_periods(household_id);
 create index if not exists idx_categories_household on categories(household_id);
+create index if not exists idx_subcategories_category on subcategories(category_id);
 create index if not exists idx_period_budgets_period on period_budgets(period_id);
 create index if not exists idx_transactions_household on transactions(household_id);
 create index if not exists idx_transactions_period on transactions(period_id);
+create index if not exists idx_transactions_subcategory on transactions(subcategory_id);
 create index if not exists idx_transactions_date on transactions(transaction_date);
 create index if not exists idx_recurring_transactions_household on recurring_transactions(household_id);
 create index if not exists idx_recurring_transactions_next_run on recurring_transactions(next_run_date);
@@ -113,6 +136,7 @@ alter table households enable row level security;
 alter table household_members enable row level security;
 alter table budget_periods enable row level security;
 alter table categories enable row level security;
+alter table subcategories enable row level security;
 alter table period_budgets enable row level security;
 alter table transactions enable row level security;
 alter table recurring_transactions enable row level security;
@@ -159,6 +183,19 @@ create policy categories_update on categories
 drop policy if exists categories_delete on categories;
 create policy categories_delete on categories
   for delete using (exists (select 1 from household_members hm where hm.household_id = categories.household_id and hm.user_id = auth.uid()));
+
+drop policy if exists subcategories_select on subcategories;
+create policy subcategories_select on subcategories
+  for select using (exists (select 1 from household_members hm where hm.household_id = subcategories.household_id and hm.user_id = auth.uid()));
+drop policy if exists subcategories_insert on subcategories;
+create policy subcategories_insert on subcategories
+  for insert with check (exists (select 1 from household_members hm where hm.household_id = subcategories.household_id and hm.user_id = auth.uid()));
+drop policy if exists subcategories_update on subcategories;
+create policy subcategories_update on subcategories
+  for update using (exists (select 1 from household_members hm where hm.household_id = subcategories.household_id and hm.user_id = auth.uid()));
+drop policy if exists subcategories_delete on subcategories;
+create policy subcategories_delete on subcategories
+  for delete using (exists (select 1 from household_members hm where hm.household_id = subcategories.household_id and hm.user_id = auth.uid()));
 
 drop policy if exists period_budgets_select on period_budgets;
 create policy period_budgets_select on period_budgets
@@ -232,6 +269,19 @@ create policy categories_public_update on categories
   for update using (true) with check (true);
 drop policy if exists categories_public_delete on categories;
 create policy categories_public_delete on categories
+  for delete using (true);
+
+drop policy if exists subcategories_public_select on subcategories;
+create policy subcategories_public_select on subcategories
+  for select using (true);
+drop policy if exists subcategories_public_insert on subcategories;
+create policy subcategories_public_insert on subcategories
+  for insert with check (true);
+drop policy if exists subcategories_public_update on subcategories;
+create policy subcategories_public_update on subcategories
+  for update using (true) with check (true);
+drop policy if exists subcategories_public_delete on subcategories;
+create policy subcategories_public_delete on subcategories
   for delete using (true);
 
 drop policy if exists period_budgets_public_select on period_budgets;

@@ -6,6 +6,7 @@ let state = {
   household: { id: null, name: 'Viki & Káťa', budget_start_day: 1 },
   periods: [],
   categories: [],
+  subcategories: [],
   periodBudgets: [],
   recurringTransactions: [],
   transactions: [],
@@ -45,6 +46,31 @@ const PERSONAL_BUDGETS = [
   { name: 'Osobní Viki', icon: '👩', amount: 4000 },
   { name: 'Osobní Káťa', icon: '🧑', amount: 4000 },
 ];
+const DEFAULT_CATEGORY_LIBRARY = [
+  { name: 'Nájem', icon: '🏠', type: 'expense' },
+  { name: 'Potraviny', icon: '🛒', type: 'expense', split_mode: 'half', split_by_person: true },
+  { name: 'Pohonné hmoty', icon: '⛽', type: 'expense' },
+  { name: 'Drogerie', icon: '🧴', type: 'expense' },
+  { name: 'Psi', icon: '🐶', type: 'expense' },
+  { name: 'TV/Internet', icon: '📺', type: 'expense' },
+  { name: 'Předplatné', icon: '📲', type: 'expense' },
+  { name: 'Jídlo v práci', icon: '🍱', type: 'expense', split_mode: 'custom', split_by_person: true, split_viki_amount: 0, split_kata_amount: 0 },
+  { name: 'Úvěr', icon: '🏦', type: 'expense' },
+  { name: 'Další', icon: '📦', type: 'expense' },
+  { name: 'Výplata Káťa', icon: '💼', type: 'income' },
+  { name: 'Výplata Viki', icon: '💼', type: 'income' },
+  { name: 'Příjem', icon: '💰', type: 'income' },
+];
+const DEFAULT_SUBCATEGORY_LIBRARY = {
+  'Nájem': ['Nájem', 'Elektřina', 'Služby'],
+  'Potraviny': ['Penny', 'Lidl', 'Albert', 'Tesco'],
+  'TV/Internet': ['Vodafone', 'O2'],
+  'Předplatné': ['Netflix', 'ChatGPT', 'Oneplay', 'iCloud', 'Google Cloud'],
+  'Příjem': ['Veru K.', 'Veru G.', 'Ostatní'],
+  'Úvěr': ['Úvěr 1', 'Úvěr 2', 'Úvěr 3'],
+  'Pohonné hmoty': ['Modrá', 'Černá'],
+  'Psi': ['Meggie', 'Džejna'],
+};
 
 // Helper functions
 function formatCurrency(value) {
@@ -161,6 +187,12 @@ function getPeriodById(id) {
 }
 function getCategoryById(id) {
   return state.categories.find((c) => c.id === id) || null;
+}
+function getSubcategoryById(id) {
+  return state.subcategories.find((s) => s.id === id) || null;
+}
+function getSubcategoriesForCategory(categoryId) {
+  return state.subcategories.filter((subcategory) => subcategory.category_id === categoryId).sort((a, b) => String(a.name).localeCompare(String(b.name), 'cs'));
 }
 function getTransactionsForPeriod(periodId) {
   return state.transactions.filter((t) => t.period_id === periodId);
@@ -306,12 +338,19 @@ function computeCategoryMetrics(category, period) {
 }
 
 function computeCategoryPersonSplit(category, periodId, totalBudget) {
-  if (!category?.split_by_person) {
+  const splitMode = category?.split_mode || (category?.split_by_person ? 'half' : 'none');
+  if (splitMode === 'none') {
     return null;
   }
   const safeBudget = safeNumber(totalBudget);
-  const perPersonBudget = safeBudget / 2;
+  let vikiBudget = safeBudget / 2;
+  let kataBudget = safeBudget / 2;
+  if (splitMode === 'custom') {
+    vikiBudget = safeNumber(category.split_viki_amount);
+    kataBudget = safeNumber(category.split_kata_amount);
+  }
   const personSpend = { viki: 0, kata: 0 };
+  const ratioTotal = vikiBudget + kataBudget;
 
   state.transactions
     .filter((transaction) => transaction.period_id === periodId && transaction.category_id === category.id && transaction.type === 'expense')
@@ -322,18 +361,20 @@ function computeCategoryPersonSplit(category, periodId, totalBudget) {
       } else if (transaction.paid_by === 'Káťa') {
         personSpend.kata += amount;
       } else {
-        personSpend.viki += amount / 2;
-        personSpend.kata += amount / 2;
+        const vikiRatio = ratioTotal > 0 ? (vikiBudget / ratioTotal) : 0.5;
+        personSpend.viki += amount * vikiRatio;
+        personSpend.kata += amount * (1 - vikiRatio);
       }
     });
 
   return {
-    vikiBudget: perPersonBudget,
-    kataBudget: perPersonBudget,
+    mode: splitMode,
+    vikiBudget,
+    kataBudget,
     vikiSpent: personSpend.viki,
     kataSpent: personSpend.kata,
-    vikiRemaining: perPersonBudget - personSpend.viki,
-    kataRemaining: perPersonBudget - personSpend.kata,
+    vikiRemaining: vikiBudget - personSpend.viki,
+    kataRemaining: kataBudget - personSpend.kata,
   };
 }
 function calculatePeriodSummary(period) {
@@ -463,6 +504,57 @@ async function cleanupDuplicatePersonalCategories() {
       await supabaseCall('PATCH', 'transactions', { category_id: `eq.${duplicate.id}`, household_id: `eq.${state.household.id}` }, { category_id: keeper.id });
       await supabaseCall('PATCH', 'period_budgets', { category_id: `eq.${duplicate.id}` }, { category_id: keeper.id });
       await supabaseCall('DELETE', 'categories', { id: `eq.${duplicate.id}` });
+    }
+  }
+}
+
+async function ensureDefaultCategoryLibrary() {
+  if (!state.household?.id) return;
+  const normalize = (value) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  const existingByName = new Map(state.categories.map((category) => [normalize(category.name), category]));
+
+  for (const template of DEFAULT_CATEGORY_LIBRARY) {
+    if (existingByName.has(normalize(template.name))) continue;
+    await supabaseCall('POST', 'categories', {}, {
+      household_id: state.household.id,
+      name: template.name,
+      icon: template.icon || '📦',
+      type: template.type || 'expense',
+      active: true,
+      default_budget: 0,
+      allocation_percent: 0,
+      split_by_person: template.split_by_person === true,
+      split_mode: template.split_mode || 'none',
+      split_viki_amount: safeNumber(template.split_viki_amount),
+      split_kata_amount: safeNumber(template.split_kata_amount),
+    });
+  }
+}
+
+async function ensureDefaultSubcategoryLibrary() {
+  if (!state.household?.id || !state.categories.length) return;
+
+  const categoryByName = new Map(state.categories.map((category) => [category.name, category]));
+  const existing = await supabaseCall('GET', 'subcategories', {
+    household_id: `eq.${state.household.id}`,
+    order: 'name.asc',
+  });
+  const existingKeys = new Set((existing || []).map((item) => `${item.category_id}::${String(item.name).toLowerCase()}`));
+
+  for (const [categoryName, names] of Object.entries(DEFAULT_SUBCATEGORY_LIBRARY)) {
+    const category = categoryByName.get(categoryName);
+    if (!category) continue;
+    for (const name of names) {
+      const key = `${category.id}::${String(name).toLowerCase()}`;
+      if (existingKeys.has(key)) continue;
+      await supabaseCall('POST', 'subcategories', {}, {
+        household_id: state.household.id,
+        category_id: category.id,
+        name,
+        icon: category.icon || '📦',
+        active: true,
+      });
+      existingKeys.add(key);
     }
   }
 }
@@ -646,8 +738,17 @@ async function loadAllData() {
     state.recurringTransactions = recurringTransactions || [];
     state.transactions = transactions || [];
 
+    await ensureDefaultCategoryLibrary();
+    state.categories = await supabaseCall('GET', 'categories', { household_id: `eq.${householdId}`, order: 'name.asc' });
     await cleanupDuplicatePersonalCategories();
     state.categories = await supabaseCall('GET', 'categories', { household_id: `eq.${householdId}`, order: 'name.asc' });
+    try {
+      await ensureDefaultSubcategoryLibrary();
+      state.subcategories = await supabaseCall('GET', 'subcategories', { household_id: `eq.${householdId}`, order: 'name.asc' });
+    } catch (error) {
+      console.warn('Subcategories nejsou dostupné:', error);
+      state.subcategories = [];
+    }
 
     if (state.recurringTransactions.length) {
       await runRecurringTransactionsForToday();
@@ -679,7 +780,8 @@ async function insertTransaction(formData, options = {}) {
     period_id: getPeriodForDate(formData.transaction_date),
     type: formData.type,
     amount: Number(formData.amount),
-    category_id: formData.type === 'expense' ? formData.category_id : null,
+    category_id: formData.category_id || null,
+    subcategory_id: formData.type === 'expense' ? (formData.subcategory_id || null) : null,
     paid_by: formData.paid_by,
     transaction_date: formData.transaction_date,
     note: formData.note,
@@ -722,7 +824,8 @@ async function updateTransaction(id, payload) {
     ...payload,
     period_id: getPeriodForDate(payload.transaction_date),
     amount: Number(payload.amount),
-    category_id: payload.type === 'expense' ? payload.category_id : null,
+    category_id: payload.category_id || null,
+    subcategory_id: payload.type === 'expense' ? (payload.subcategory_id || null) : null,
   };
   
   try {
@@ -825,6 +928,41 @@ async function updateCategory(id, payload) {
   try {
     await supabaseCall('PATCH', 'categories', { id: `eq.${id}` }, payload);
     state.status = { type: 'success', message: 'Kategorie upravena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
+async function createSubcategory(payload) {
+  state.loading = true;
+  render();
+
+  try {
+    await supabaseCall('POST', 'subcategories', {}, {
+      ...payload,
+      household_id: state.household.id,
+      active: true,
+    });
+    state.status = { type: 'success', message: 'Podkategorie vytvořena.' };
+    await loadAllData();
+  } catch (error) {
+    state.status = { type: 'error', message: formatApiErrorMessage(error) };
+    state.loading = false;
+    render();
+  }
+}
+
+async function deleteSubcategory(id) {
+  if (!confirm('Opravdu chcete smazat podkategorii?')) return;
+  state.loading = true;
+  render();
+
+  try {
+    await supabaseCall('DELETE', 'subcategories', { id: `eq.${id}` });
+    state.status = { type: 'success', message: 'Podkategorie smazána.' };
     await loadAllData();
   } catch (error) {
     state.status = { type: 'error', message: formatApiErrorMessage(error) };
@@ -1042,6 +1180,7 @@ function exportJsonBackup() {
     household: state.household,
     periods: state.periods,
     categories: state.categories,
+    subcategories: state.subcategories,
     periodBudgets: state.periodBudgets,
     transactions: state.transactions,
     recurringTransactions: state.recurringTransactions,
@@ -1055,6 +1194,7 @@ function exportTransactionsCsv() {
     typ: t.type,
     castka: t.amount,
     kategorie: getCategoryById(t.category_id)?.name || '',
+    podkategorie: getSubcategoryById(t.subcategory_id)?.name || '',
     osoba: t.paid_by,
     poznamka: t.note || '',
   }));
@@ -1347,12 +1487,13 @@ function renderHistory() {
       </div>
     </div>
     <div class="card" style="margin-top:16px;">
-      ${filtered.length ? `<table class="table"><thead><tr><th>Datum</th><th>Typ</th><th>Částka</th><th>Kategorie</th><th>Osoba</th><th>Poznámka</th><th></th></tr></thead><tbody>${filtered.map((t) => `
+      ${filtered.length ? `<table class="table"><thead><tr><th>Datum</th><th>Typ</th><th>Částka</th><th>Kategorie</th><th>Podkategorie</th><th>Osoba</th><th>Poznámka</th><th></th></tr></thead><tbody>${filtered.map((t) => `
         <tr>
           <td>${t.transaction_date}</td>
           <td><span class="badge ${t.type === 'income' ? 'badge-success' : 'badge-danger'}">${t.type === 'income' ? 'Příjem' : 'Výdaj'}</span></td>
           <td>${formatCurrency(t.amount)}</td>
           <td>${t.category_id ? getCategoryById(t.category_id)?.name || '—' : '—'}</td>
+          <td>${t.subcategory_id ? getSubcategoryById(t.subcategory_id)?.name || '—' : '—'}</td>
           <td>${t.paid_by}</td>
           <td>${t.note || '—'}</td>
           <td><div class="row-actions"><button class="btn btn-secondary" data-action="edit-transaction" data-id="${t.id}">Upravit</button><button class="btn btn-danger" data-action="delete-transaction" data-id="${t.id}">Smazat</button></div></td>
@@ -1382,7 +1523,9 @@ function renderBudgetManagement() {
   return `<div class="container"><div class="card"><div class="row" style="justify-content: space-between; align-items:center;"><h2>Správa rozpočtů</h2><button class="btn btn-primary" data-action="show-create-category">Přidat nový rozpočet</button></div><p style="color:var(--muted); margin-top:8px;">Každou kategorii lze upravit, vypnout nebo smazat. Níže vidíš i průběh čerpání rozpočtu v aktuálním období.</p><div class="list" style="margin-top:12px;">${state.categories.length ? state.categories.map((category) => {
     const metrics = period ? computeCategoryMetrics(category, period) : { expenses: 0, totalAvailable: 0 };
     const percent = metrics.totalAvailable > 0 ? Math.min(140, Math.round((metrics.expenses / metrics.totalAvailable) * 100)) : 0;
-    return `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Fixně: ${formatCurrency(category.default_budget)} · Procento: ${safeNumber(category.allocation_percent)} % (jen když fixní=0) · Dělit mezi osoby: ${category.split_by_person ? 'ANO' : 'NE'}</div><div class="budget-compare" style="margin-top:8px;"><div class="budget-compare-track"><span style="width:${Math.max(4, Math.min(percent, 100))}%"></span></div><div class="budget-compare-label">Vyčerpáno ${formatCurrency(metrics.expenses)} z ${formatCurrency(metrics.totalAvailable)}</div></div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button><button class="btn btn-danger" data-action="delete-category" data-id="${category.id}">Smazat</button></div></div>`;
+    const splitMode = category.split_mode || (category.split_by_person ? 'half' : 'none');
+    const splitLabel = splitMode === 'custom' ? 'Vlastní částky' : splitMode === 'half' ? '50/50' : 'Nedělit';
+    return `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Fixně: ${formatCurrency(category.default_budget)} · Procento: ${safeNumber(category.allocation_percent)} % (jen když fixní=0) · Dělení: ${splitLabel}</div><div class="budget-compare" style="margin-top:8px;"><div class="budget-compare-track"><span style="width:${Math.max(4, Math.min(percent, 100))}%"></span></div><div class="budget-compare-label">Vyčerpáno ${formatCurrency(metrics.expenses)} z ${formatCurrency(metrics.totalAvailable)}</div></div><div class="row" style="margin-top:8px;"><button class="btn btn-secondary" data-action="edit-category" data-id="${category.id}">Upravit</button><button class="btn btn-secondary" data-action="toggle-category" data-id="${category.id}">${category.active === false ? 'Aktivovat' : 'Deaktivovat'}</button><button class="btn btn-danger" data-action="delete-category" data-id="${category.id}">Smazat</button></div></div>`;
   }).join('') : '<div class="empty">Žádné kategorie</div>'}</div></div></div>`;
 }
 
@@ -1468,6 +1611,22 @@ function renderSettings() {
   return `
     ${renderPeriods()}
     <div class="container" style="margin-top:16px;">
+      <div class="card" style="margin-bottom:16px;">
+        <div class="row" style="justify-content: space-between; align-items:center;">
+          <h2>Kategorie a podkategorie</h2>
+          <div class="row">
+            <button class="btn btn-primary" data-action="show-create-category">Přidat kategorii</button>
+            <button class="btn btn-secondary" data-action="show-create-subcategory">Přidat podkategorii</button>
+          </div>
+        </div>
+        <div class="list" style="margin-top:12px;">
+          ${state.categories.length ? state.categories.map((category) => {
+            const subcats = getSubcategoriesForCategory(category.id);
+            return `<div class="list-item"><strong>${category.icon || '📦'} ${category.name}</strong><div style="color:var(--muted); margin-top:6px;">Typ: ${category.type === 'income' ? 'Příjem' : 'Výdaj'} · Podkategorií: ${subcats.length}</div>${subcats.length ? `<div class="row" style="margin-top:8px;">${subcats.map((subcategory) => `<span class="badge badge-success" style="display:inline-flex; align-items:center; gap:8px;">${subcategory.icon || '•'} ${subcategory.name}<button class="btn btn-danger" style="padding:3px 8px;" data-action="delete-subcategory" data-id="${subcategory.id}">x</button></span>`).join('')}</div>` : ''}</div>`;
+          }).join('') : '<div class="empty">Zatím žádné kategorie</div>'}
+        </div>
+      </div>
+
       <div class="card">
         <div class="row" style="justify-content: space-between; align-items:center;">
           <h2>Opakované transakce</h2>
@@ -1565,6 +1724,7 @@ function attachEvents() {
   document.querySelectorAll('[data-action="show-add-transaction"]').forEach((btn) => btn.addEventListener('click', () => showTransactionModal()));
   document.querySelectorAll('[data-action="show-create-period"]').forEach((btn) => btn.addEventListener('click', () => showPeriodModal()));
   document.querySelectorAll('[data-action="show-create-category"]').forEach((btn) => btn.addEventListener('click', () => showCategoryModal()));
+  document.querySelectorAll('[data-action="show-create-subcategory"]').forEach((btn) => btn.addEventListener('click', () => showSubcategoryModal()));
   document.querySelectorAll('[data-category-id]').forEach((card) => card.addEventListener('click', () => showCategoryDetailModal(card.dataset.categoryId)));
   document.getElementById('period-select')?.addEventListener('change', (event) => {
     state.currentPeriodId = event.target.value;
@@ -1591,6 +1751,7 @@ function attachEvents() {
     updateCategory(category.id, { active: category.active === false ? true : false });
   }));
   document.querySelectorAll('[data-action="delete-category"]').forEach((btn) => btn.addEventListener('click', () => deleteCategory(btn.dataset.id)));
+  document.querySelectorAll('[data-action="delete-subcategory"]').forEach((btn) => btn.addEventListener('click', () => deleteSubcategory(btn.dataset.id)));
   document.querySelectorAll('[data-action="edit-period"]').forEach((btn) => btn.addEventListener('click', () => showPeriodModal(btn.dataset.id)));
   document.querySelectorAll('[data-action="delete-period"]').forEach((btn) => btn.addEventListener('click', () => deletePeriod(btn.dataset.id)));
   document.getElementById('period-start-day-form')?.addEventListener('submit', (event) => {
@@ -1631,6 +1792,18 @@ function attachEvents() {
 function showTransactionModal(transactionId = null) {
   const transaction = state.transactions.find((t) => t.id === transactionId) || null;
   const period = getCurrentPeriod();
+  const categoryOptionsByType = (type, selectedId = '') => {
+    const items = state.categories.filter((category) => category.active !== false && category.type === type);
+    return ['<option value="">Bez kategorie</option>', ...items.map((category) => `<option value="${category.id}" ${selectedId === category.id ? 'selected' : ''}>${category.icon || '📦'} ${category.name}</option>`)]
+      .join('');
+  };
+  const subcategoryOptions = (categoryId, selectedId = '') => {
+    const items = categoryId ? getSubcategoriesForCategory(categoryId) : [];
+    return ['<option value="">Bez podkategorie</option>', ...items.map((item) => `<option value="${item.id}" ${selectedId === item.id ? 'selected' : ''}>${item.icon || '•'} ${item.name}</option>`)]
+      .join('');
+  };
+  const selectedType = transaction?.type || 'expense';
+  const selectedCategoryId = transaction?.category_id || '';
   const form = `
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
@@ -1638,10 +1811,11 @@ function showTransactionModal(transactionId = null) {
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <form id="transaction-form" class="form-grid" style="margin-top:12px;">
-        <label>Typ<select name="type"><option value="expense" ${transaction?.type === 'expense' || !transaction ? 'selected' : ''}>Výdaj</option><option value="income" ${transaction?.type === 'income' ? 'selected' : ''}>Příjem</option></select></label>
+        <label>Typ<select name="type" id="transaction-type"><option value="expense" ${selectedType === 'expense' ? 'selected' : ''}>Výdaj</option><option value="income" ${selectedType === 'income' ? 'selected' : ''}>Příjem</option></select></label>
         <label>Částka<input name="amount" type="number" step="0.01" required value="${transaction?.amount || ''}"></label>
         <label>Datum<input name="transaction_date" type="date" required value="${transaction?.transaction_date || getToday()}"></label>
-        <label>Kategorie<select name="category_id"><option value="">Bez kategorie</option>${state.categories.filter((c) => c.active !== false).map((category) => `<option value="${category.id}" ${transaction?.category_id === category.id ? 'selected' : ''}>${category.name}</option>`).join('')}</select></label>
+        <label>Kategorie<select name="category_id" id="transaction-category">${categoryOptionsByType(selectedType, selectedCategoryId)}</select></label>
+        <label id="subcategory-wrap" style="display:${selectedType === 'expense' ? 'flex' : 'none'};">Podkategorie<select name="subcategory_id" id="transaction-subcategory">${subcategoryOptions(selectedCategoryId, transaction?.subcategory_id || '')}</select></label>
         <label>Osoba<select name="paid_by"><option value="Viki" ${transaction?.paid_by === 'Viki' ? 'selected' : ''}>Viki</option><option value="Káťa" ${transaction?.paid_by === 'Káťa' ? 'selected' : ''}>Káťa</option><option value="Společné" ${transaction?.paid_by === 'Společné' ? 'selected' : ''}>Společné</option></select></label>
         <label>Poznámka<textarea name="note">${transaction?.note || ''}</textarea></label>
         ${transaction ? '' : `
@@ -1681,6 +1855,33 @@ function showTransactionModal(transactionId = null) {
     </div>`;
   showModal(form);
   document.getElementById('close-modal').addEventListener('click', closeModal);
+  const typeSelect = document.getElementById('transaction-type');
+  const categorySelect = document.getElementById('transaction-category');
+  const subcategorySelect = document.getElementById('transaction-subcategory');
+  const subcategoryWrap = document.getElementById('subcategory-wrap');
+
+  const refreshCategoryAndSubcategory = () => {
+    const selectedTypeLocal = typeSelect?.value || 'expense';
+    const previousCategory = categorySelect?.value || '';
+    if (categorySelect) {
+      categorySelect.innerHTML = categoryOptionsByType(selectedTypeLocal, previousCategory);
+    }
+    const currentCategory = categorySelect?.value || '';
+    if (subcategorySelect) {
+      subcategorySelect.innerHTML = subcategoryOptions(currentCategory, '');
+    }
+    if (subcategoryWrap) {
+      subcategoryWrap.style.display = selectedTypeLocal === 'expense' ? 'flex' : 'none';
+    }
+  };
+
+  typeSelect?.addEventListener('change', refreshCategoryAndSubcategory);
+  categorySelect?.addEventListener('change', () => {
+    if (subcategorySelect) {
+      subcategorySelect.innerHTML = subcategoryOptions(categorySelect.value, '');
+    }
+  });
+
   const recurringEnabled = document.getElementById('recurring-enabled');
   const recurringOptions = document.getElementById('recurring-options');
   const recurringOverflowWrap = document.getElementById('recurring-overflow-wrap');
@@ -1757,8 +1958,9 @@ function showTransactionModal(transactionId = null) {
 
 function showCategoryModal(categoryId = null) {
   const category = state.categories.find((c) => c.id === categoryId) || null;
-  const selectedName = category?.name || PRESET_CATEGORY_NAMES[0];
-  const selectedIcon = category?.icon || CATEGORY_ICON_BY_NAME[selectedName] || '📦';
+  const selectedName = category?.name || '';
+  const selectedIcon = category?.icon || '📦';
+  const selectedSplitMode = category?.split_mode || (category?.split_by_person ? 'half' : 'none');
   const form = `
     <div class="modal-card">
       <div class="row" style="justify-content: space-between; align-items:center;">
@@ -1766,30 +1968,32 @@ function showCategoryModal(categoryId = null) {
         <button class="btn btn-secondary" id="close-modal">Zavřít</button>
       </div>
       <form id="category-form" class="form-grid" style="margin-top:12px;">
-        <label>Název<select name="name" id="category-name" required>${getCategoryNameOptions(selectedName)}</select></label>
-        <label>Ikona<select name="icon" id="category-icon">${getCategoryIconOptions(selectedIcon)}</select></label>
+        <label>Název kategorie<input name="name" id="category-name" required value="${selectedName}" placeholder="Např. Potraviny"></label>
+        <label>Ikona (emoji)<input name="icon" id="category-icon" value="${selectedIcon}" placeholder="🛒"></label>
+        <label>Typ<select name="type"><option value="expense" ${category?.type !== 'income' ? 'selected' : ''}>Výdaj</option><option value="income" ${category?.type === 'income' ? 'selected' : ''}>Příjem</option></select></label>
         <label>Výchozí rozpočet<input name="default_budget" type="number" step="0.01" value="${category?.default_budget || 0}"></label>
         <label>Procento z potvrzených výplat (0-100)<input name="allocation_percent" type="number" step="0.01" min="0" max="100" value="${category?.allocation_percent || 0}"></label>
-        <label style="display:flex; align-items:center; gap:8px;">
-          <input name="split_by_person" type="checkbox" ${category?.split_by_person ? 'checked' : ''}>
-          Dělit rozpočet na polovinu podle osoby (Viki/Káťa)
+        <label>Dělení rozpočtu mezi osoby
+          <select name="split_mode" id="split-mode">
+            <option value="none" ${selectedSplitMode === 'none' ? 'selected' : ''}>Nedělit</option>
+            <option value="half" ${selectedSplitMode === 'half' ? 'selected' : ''}>50 / 50</option>
+            <option value="custom" ${selectedSplitMode === 'custom' ? 'selected' : ''}>Vlastní částky</option>
+          </select>
         </label>
+        <div id="split-custom-wrap" class="grid grid-2" style="display:${selectedSplitMode === 'custom' ? 'grid' : 'none'};">
+          <label>Limit Viki (Kč)<input name="split_viki_amount" type="number" step="0.01" min="0" value="${safeNumber(category?.split_viki_amount)}"></label>
+          <label>Limit Káťa (Kč)<input name="split_kata_amount" type="number" step="0.01" min="0" value="${safeNumber(category?.split_kata_amount)}"></label>
+        </div>
         <button class="btn btn-primary" type="submit" ${state.loading ? 'disabled' : ''}>${category ? 'Uložit' : 'Přidat'}</button>
       </form>
     </div>`;
   showModal(form);
   document.getElementById('close-modal').addEventListener('click', closeModal);
-  const nameSelect = document.getElementById('category-name');
-  const iconSelect = document.getElementById('category-icon');
-  let iconWasChanged = false;
-  iconSelect?.addEventListener('change', () => {
-    iconWasChanged = true;
-  });
-  nameSelect?.addEventListener('change', (event) => {
-    if (iconWasChanged || category) return;
-    const suggestedIcon = CATEGORY_ICON_BY_NAME[event.target.value];
-    if (suggestedIcon && iconSelect) {
-      iconSelect.value = suggestedIcon;
+  const splitModeSelect = document.getElementById('split-mode');
+  const splitCustomWrap = document.getElementById('split-custom-wrap');
+  splitModeSelect?.addEventListener('change', () => {
+    if (splitCustomWrap) {
+      splitCustomWrap.style.display = splitModeSelect.value === 'custom' ? 'grid' : 'none';
     }
   });
   document.getElementById('category-form').addEventListener('submit', (event) => {
@@ -1798,16 +2002,56 @@ function showCategoryModal(categoryId = null) {
     const payload = Object.fromEntries(formData.entries());
     payload.default_budget = Number(payload.default_budget);
     payload.allocation_percent = Number(payload.allocation_percent);
-    payload.split_by_person = formData.get('split_by_person') === 'on';
+    payload.split_mode = payload.split_mode || 'none';
+    payload.split_by_person = payload.split_mode !== 'none';
+    payload.split_viki_amount = payload.split_mode === 'custom' ? safeNumber(payload.split_viki_amount) : 0;
+    payload.split_kata_amount = payload.split_mode === 'custom' ? safeNumber(payload.split_kata_amount) : 0;
+    if (!payload.icon?.trim()) {
+      payload.icon = '📦';
+    }
     if (!category) {
       payload.active = true;
-      payload.type = 'expense';
     }
     if (category) {
       updateCategory(category.id, payload);
     } else {
       createCategory(payload);
     }
+    closeModal();
+  });
+}
+
+function showSubcategoryModal() {
+  const expenseCategories = state.categories.filter((category) => category.active !== false && category.type === 'expense');
+  if (!expenseCategories.length) {
+    state.status = { type: 'error', message: 'Nejprve vytvoř alespoň jednu výdajovou kategorii.' };
+    render();
+    return;
+  }
+  showModal(`
+    <div class="modal-card">
+      <div class="row" style="justify-content: space-between; align-items:center;">
+        <h3>Nová podkategorie</h3>
+        <button class="btn btn-secondary" id="close-modal">Zavřít</button>
+      </div>
+      <form id="subcategory-form" class="form-grid" style="margin-top:12px;">
+        <label>Nadřazená kategorie
+          <select name="category_id" required>
+            ${expenseCategories.map((category) => `<option value="${category.id}">${category.icon || '📦'} ${category.name}</option>`).join('')}
+          </select>
+        </label>
+        <label>Název podkategorie<input name="name" required placeholder="Např. Lidl"></label>
+        <label>Ikona (emoji)<input name="icon" placeholder="🧾"></label>
+        <button class="btn btn-primary" type="submit">Přidat podkategorii</button>
+      </form>
+    </div>
+  `);
+  document.getElementById('close-modal')?.addEventListener('click', closeModal);
+  document.getElementById('subcategory-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    payload.icon = payload.icon?.trim() || '•';
+    createSubcategory(payload);
     closeModal();
   });
 }
@@ -1878,7 +2122,7 @@ function showCategoryDetailModal(categoryId) {
       </div>
       <div class="card" style="margin-top:12px;">
         <h4>Transakce</h4>
-        ${transactions.length ? transactions.map((t) => `<div class="list-item">${t.transaction_date} · ${formatCurrency(t.amount)} · ${t.note || '—'}</div>`).join('') : '<div class="empty">Žádné výdaje</div>'}
+        ${transactions.length ? transactions.map((t) => `<div class="list-item">${t.transaction_date} · ${formatCurrency(t.amount)} · ${getSubcategoryById(t.subcategory_id)?.name || 'Bez podkategorie'} · ${t.note || '—'}</div>`).join('') : '<div class="empty">Žádné výdaje</div>'}
       </div>
     </div>
   `);
