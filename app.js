@@ -467,6 +467,7 @@ function calculatePeriodSummary(period) {
   const expenses = tx.filter((t) => t.type === 'expense').reduce((sum, t) => sum + safeNumber(t.amount), 0);
   const openingBalance = getOpeningBalanceForPeriod(period);
   const balance = openingBalance + incomes - expenses;
+  const allocatableCash = openingBalance + incomes;
   const categories = state.categories.filter((c) => c.active !== false);
   const metricsByCategory = categories.map((category) => computeCategoryMetrics(category, period));
   const categoryBudgetTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.baseBudget), 0);
@@ -476,7 +477,7 @@ function calculatePeriodSummary(period) {
   const spentTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.expenses), 0);
   const remainingTotal = availableTotal - spentTotal;
   const plannedTotal = categoryBudgetTotal + manualAdjustmentTotal;
-  const freeCash = balance - plannedTotal;
+  const freeCash = allocatableCash - plannedTotal;
   return { incomes, expenses, openingBalance, balance, categoryBudgetTotal, rolloverTotal, manualAdjustmentTotal, availableTotal, spentTotal, remainingTotal, plannedTotal, freeCash };
 }
 
@@ -1636,7 +1637,7 @@ function renderDashboard() {
         <div class="stat-card"><div class="stat-label">Výdaje</div><div class="stat-value">${formatCurrency(summary.expenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Bilance</div><div class="stat-value">${formatCurrency(summary.balance)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán rozpočtů</div><div class="stat-value">${formatCurrency(summary.plannedTotal)}</div></div>
-        <div class="stat-card"><div class="stat-label">Zůstatek mimo kategorie</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
+        <div class="stat-card"><div class="stat-label">Volné k rozdělení</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
       </div>
       <div class="grid grid-2" style="margin-top:16px;">
         <div class="card">
