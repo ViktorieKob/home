@@ -14,6 +14,7 @@ let state = {
   lastPeriodAutoPromptDate: null,
   loading: false,
   status: null,
+  dashboardExpenseChartMode: 'category',
   filters: { periodId: 'all', categoryId: 'all', person: 'all', type: 'all', search: '' },
 };
 
@@ -465,6 +466,22 @@ function calculatePeriodSummary(period) {
   const tx = getTransactionsForPeriod(period.id);
   const incomes = tx.filter((t) => t.type === 'income').reduce((sum, t) => sum + safeNumber(t.amount), 0);
   const expenses = tx.filter((t) => t.type === 'expense').reduce((sum, t) => sum + safeNumber(t.amount), 0);
+  const unbudgetedExpenses = tx
+    .filter((t) => t.type === 'expense')
+    .reduce((sum, t) => {
+      if (!t.category_id) {
+        return sum + safeNumber(t.amount);
+      }
+      const category = getCategoryById(t.category_id);
+      if (!category || category.type !== 'expense') {
+        return sum + safeNumber(t.amount);
+      }
+      const budgetRow = getPeriodBudgetRecord(t.category_id, period.id);
+      if (!budgetRow) {
+        return sum + safeNumber(t.amount);
+      }
+      return sum;
+    }, 0);
   const openingBalance = getOpeningBalanceForPeriod(period);
   const balance = openingBalance + incomes - expenses;
   const allocatableCash = openingBalance + incomes;
@@ -477,8 +494,144 @@ function calculatePeriodSummary(period) {
   const spentTotal = metricsByCategory.reduce((sum, metrics) => sum + safeNumber(metrics.expenses), 0);
   const remainingTotal = availableTotal - spentTotal;
   const plannedTotal = categoryBudgetTotal + manualAdjustmentTotal;
-  const freeCash = allocatableCash - plannedTotal;
-  return { incomes, expenses, openingBalance, balance, categoryBudgetTotal, rolloverTotal, manualAdjustmentTotal, availableTotal, spentTotal, remainingTotal, plannedTotal, freeCash };
+  const freeCash = allocatableCash - plannedTotal - unbudgetedExpenses;
+  return { incomes, expenses, openingBalance, balance, categoryBudgetTotal, rolloverTotal, manualAdjustmentTotal, availableTotal, spentTotal, remainingTotal, plannedTotal, freeCash, unbudgetedExpenses };
+}
+
+function getExpenseBucketMeta(transaction, level = 'category') {
+  const category = getCategoryById(transaction.category_id);
+  const subcategory = getSubcategoryById(transaction.subcategory_id);
+
+  if (level === 'subcategory') {
+    if (subcategory) {
+      return {
+        key: `sub:${subcategory.id}`,
+        title: subcategory.name,
+        subtitle: category?.name || 'Bez kategorie',
+        icon: subcategory.icon || '•',
+      };
+    }
+    if (category) {
+      return {
+        key: `sub:none:${category.id}`,
+        title: 'Bez podkategorie',
+        subtitle: category.name,
+        icon: '•',
+      };
+    }
+    return {
+      key: 'sub:none:none',
+      title: 'Bez kategorie',
+      subtitle: 'Mimo rozpočty',
+      icon: '📭',
+    };
+  }
+
+  if (category) {
+    return {
+      key: `cat:${category.id}`,
+      title: category.name,
+      subtitle: category.type === 'expense' ? 'Kategorie rozpočtu' : 'Mimo výdajové rozpočty',
+      icon: category.icon || '📦',
+    };
+  }
+
+  return {
+    key: 'cat:none',
+    title: 'Bez rozpočtu',
+    subtitle: 'Výdaj bez kategorie',
+    icon: '📭',
+  };
+}
+
+function getExpenseDrilldownRows(period, level = 'category') {
+  if (!period?.id) return [];
+  const buckets = new Map();
+
+  state.transactions
+    .filter((transaction) => transaction.period_id === period.id && transaction.type === 'expense')
+    .forEach((transaction) => {
+      const meta = getExpenseBucketMeta(transaction, level);
+      if (!buckets.has(meta.key)) {
+        buckets.set(meta.key, { ...meta, amount: 0, count: 0 });
+      }
+      const bucket = buckets.get(meta.key);
+      bucket.amount += safeNumber(transaction.amount);
+      bucket.count += 1;
+    });
+
+  return [...buckets.values()].sort((a, b) => b.amount - a.amount);
+}
+
+function renderExpenseDrilldownChart(period) {
+  if (!period?.id) {
+    return '<div class="empty" style="margin-top:12px;">Nejprve vyber období.</div>';
+  }
+
+  const mode = state.dashboardExpenseChartMode === 'subcategory' ? 'subcategory' : 'category';
+  const rows = getExpenseDrilldownRows(period, mode);
+  if (!rows.length) {
+    return '<div class="empty" style="margin-top:12px;">Zatím nejsou žádné výdaje.</div>';
+  }
+
+  const maxAmount = rows.reduce((max, row) => Math.max(max, row.amount), 0) || 1;
+  const visibleRows = rows.slice(0, 12);
+
+  return `
+    <div class="chart-toolbar">
+      <button class="btn btn-secondary ${mode === 'category' ? 'chart-mode-active' : ''}" data-action="set-expense-chart-mode" data-mode="category">Kategorie</button>
+      <button class="btn btn-secondary ${mode === 'subcategory' ? 'chart-mode-active' : ''}" data-action="set-expense-chart-mode" data-mode="subcategory">Podkategorie</button>
+    </div>
+    <div class="expense-drill-chart">
+      ${visibleRows.map((row) => {
+        const width = Math.max(6, Math.round((row.amount / maxAmount) * 100));
+        return `
+          <button class="chart-bar-btn" type="button" data-action="open-expense-bucket" data-level="${mode}" data-key="${row.key}" data-period-id="${period.id}">
+            <div class="chart-bar-header">
+              <strong>${row.icon} ${row.title}</strong>
+              <span>${formatCurrency(row.amount)}</span>
+            </div>
+            <div class="chart-bar-subtitle">${row.subtitle} · ${row.count} transakcí</div>
+            <div class="chart-bar-track"><span style="width:${Math.min(100, width)}%"></span></div>
+          </button>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function showExpenseBucketModal(level, key, periodId) {
+  const period = getPeriodById(periodId);
+  if (!period?.id) return;
+
+  const transactions = state.transactions
+    .filter((transaction) => transaction.period_id === period.id && transaction.type === 'expense')
+    .filter((transaction) => getExpenseBucketMeta(transaction, level).key === key)
+    .sort((a, b) => new Date(b.transaction_date) - new Date(a.transaction_date));
+
+  if (!transactions.length) {
+    state.status = { type: 'info', message: 'V této části grafu nejsou žádné transakce.' };
+    render();
+    return;
+  }
+
+  const meta = getExpenseBucketMeta(transactions[0], level);
+  const total = transactions.reduce((sum, transaction) => sum + safeNumber(transaction.amount), 0);
+
+  showModal(`
+    <div class="modal-card">
+      <div class="row" style="justify-content: space-between; align-items:center;">
+        <h3>${meta.icon} ${meta.title}</h3>
+        <button class="btn btn-secondary" id="close-modal">Zavřít</button>
+      </div>
+      <p style="margin-top:8px; color:var(--muted);">${meta.subtitle} · ${period.name}</p>
+      <p style="margin-top:6px;"><strong>Celkem:</strong> ${formatCurrency(total)}</p>
+      <div class="list" style="margin-top:12px;">
+        ${transactions.map((transaction) => `<div class="list-item">${transaction.transaction_date} · ${formatCurrency(transaction.amount)} · ${getCategoryById(transaction.category_id)?.name || 'Bez kategorie'} · ${getSubcategoryById(transaction.subcategory_id)?.name || 'Bez podkategorie'} · ${transaction.note || '—'}</div>`).join('')}
+      </div>
+    </div>
+  `);
+  document.getElementById('close-modal')?.addEventListener('click', closeModal);
 }
 
 function roundMoney(value) {
@@ -1569,7 +1722,17 @@ function closeModal() {
 function renderDashboard() {
   const period = getPeriodById(state.currentPeriodId) || state.periods[0] || null;
   const previousPeriod = state.periods.find((p) => p.id !== period?.id) || null;
-  const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0 };
+  const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0,plannedTotal:0,freeCash:0,unbudgetedExpenses:0 };
+  const vikiIncome = period
+    ? state.transactions
+      .filter((transaction) => transaction.period_id === period.id && transaction.type === 'income' && transaction.paid_by === 'Viki')
+      .reduce((sum, transaction) => sum + safeNumber(transaction.amount), 0)
+    : 0;
+  const kataIncome = period
+    ? state.transactions
+      .filter((transaction) => transaction.period_id === period.id && transaction.type === 'income' && transaction.paid_by === 'Káťa')
+      .reduce((sum, transaction) => sum + safeNumber(transaction.amount), 0)
+    : 0;
   const previousSummary = previousPeriod ? calculatePeriodSummary(previousPeriod) : null;
   const expenseRows = period
     ? state.categories
@@ -1634,9 +1797,12 @@ function renderDashboard() {
       </div>
       <div class="stat-grid" style="margin-top:16px;">
         <div class="stat-card"><div class="stat-label">Příjmy</div><div class="stat-value">${formatCurrency(summary.incomes)}</div></div>
+        <div class="stat-card"><div class="stat-label">Příjem Viki</div><div class="stat-value">${formatCurrency(vikiIncome)}</div></div>
+        <div class="stat-card"><div class="stat-label">Příjem Káťa</div><div class="stat-value">${formatCurrency(kataIncome)}</div></div>
         <div class="stat-card"><div class="stat-label">Výdaje</div><div class="stat-value">${formatCurrency(summary.expenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Bilance</div><div class="stat-value">${formatCurrency(summary.balance)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán rozpočtů</div><div class="stat-value">${formatCurrency(summary.plannedTotal)}</div></div>
+        <div class="stat-card"><div class="stat-label">Výdaje mimo rozpočty</div><div class="stat-value">${formatCurrency(summary.unbudgetedExpenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Volné k rozdělení</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
       </div>
       <div class="grid grid-2" style="margin-top:16px;">
@@ -1680,8 +1846,8 @@ function renderDashboard() {
 
       <div class="grid grid-2" style="margin-top:16px;">
         <div class="card">
-          <h3>Graf výdajů dle kategorií</h3>
-          ${expenseRows.length ? `<div class="mini-chart" style="margin-top:12px;">${expenseRows.map((row) => `<div class="mini-chart-row"><div class="mini-chart-label">${row.icon} ${row.name}</div><div class="mini-chart-track"><span style="width:${Math.max(8, Math.round((row.spent / expenseMax) * 100))}%"></span></div><div class="mini-chart-value">${formatCurrency(row.spent)}</div></div>`).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Zatím nejsou žádné výdaje v kategoriích.</div>'}
+          <h3>Proklikávací graf výdajů</h3>
+          ${renderExpenseDrilldownChart(period)}
         </div>
         <div class="card">
           <h3>Graf příjmů dle kategorií</h3>
@@ -1967,6 +2133,13 @@ function attachEvents() {
   document.querySelectorAll('[data-action="show-create-category"]').forEach((btn) => btn.addEventListener('click', () => showCategoryModal()));
   document.querySelectorAll('[data-action="show-create-subcategory"]').forEach((btn) => btn.addEventListener('click', () => showSubcategoryModal()));
   document.querySelectorAll('[data-category-id]').forEach((card) => card.addEventListener('click', () => showCategoryDetailModal(card.dataset.categoryId)));
+  document.querySelectorAll('[data-action="set-expense-chart-mode"]').forEach((btn) => btn.addEventListener('click', () => {
+    state.dashboardExpenseChartMode = btn.dataset.mode === 'subcategory' ? 'subcategory' : 'category';
+    render();
+  }));
+  document.querySelectorAll('[data-action="open-expense-bucket"]').forEach((btn) => btn.addEventListener('click', () => {
+    showExpenseBucketModal(btn.dataset.level, btn.dataset.key, btn.dataset.periodId);
+  }));
   document.getElementById('period-select')?.addEventListener('change', (event) => {
     state.currentPeriodId = event.target.value;
     render();
