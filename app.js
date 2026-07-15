@@ -21,7 +21,7 @@ let state = {
 
 const appRoot = document.getElementById('app');
 const modalRoot = document.getElementById('modal');
-const PRESET_CATEGORY_NAMES = ['Nájem', 'Potraviny', 'Pohonné hmoty', 'Drogerie', 'Psi', 'Splátky', 'Pojištění', 'Osobní'];
+const PRESET_CATEGORY_NAMES = ['Nájem', 'Potraviny', 'Pohonné hmoty', 'Drogerie', 'Psi', 'Úvěr', 'Pojištění', 'Osobní'];
 const PRESET_CATEGORY_ICONS = [
   { value: '🏠', label: 'Domov' },
   { value: '🛒', label: 'Nákup' },
@@ -39,38 +39,54 @@ const CATEGORY_ICON_BY_NAME = {
   'Pohonné hmoty': '⛽',
   'Drogerie': '🧴',
   'Psi': '🐶',
-  'Splátky': '💳',
+  'Úvěr': '🏦',
   'Pojištění': '🛡️',
   'Osobní': '👤',
 };
 const CZECH_MONTH_NAMES = ['Leden', 'Únor', 'Březen', 'Duben', 'Květen', 'Červen', 'Červenec', 'Srpen', 'Září', 'Říjen', 'Listopad', 'Prosinec'];
 const PERSONAL_BUDGETS = [
-  { name: 'Osobní Viki', icon: '👩', amount: 4000 },
-  { name: 'Osobní Káťa', icon: '🧑', amount: 4000 },
+  { name: 'Osobní (Viki)', icon: '👩', amount: 4000 },
+  { name: 'Osobní (Káťa)', icon: '🧑', amount: 4000 },
 ];
 const DEFAULT_CATEGORY_LIBRARY = [
-  { name: 'Nájem', icon: '🏠', type: 'expense' },
-  { name: 'Potraviny', icon: '🛒', type: 'expense', split_mode: 'half', split_by_person: true },
-  { name: 'Pohonné hmoty', icon: '⛽', type: 'expense' },
-  { name: 'Drogerie', icon: '🧴', type: 'expense' },
-  { name: 'Psi', icon: '🐶', type: 'expense' },
-  { name: 'TV/Internet', icon: '📺', type: 'expense' },
-  { name: 'Předplatné', icon: '📲', type: 'expense' },
-  { name: 'Jídlo v práci', icon: '🍱', type: 'expense', split_mode: 'custom', split_by_person: true, split_viki_amount: 0, split_kata_amount: 0 },
-  { name: 'Úvěr', icon: '🏦', type: 'expense' },
+  { name: 'Úvěr 1 (Káťa)', icon: '🏦', type: 'expense', default_budget: 6596 },
+  { name: 'Úvěr 2 (Káťa)', icon: '🏦', type: 'expense', default_budget: 1485 },
+  { name: 'Úvěr 3 (Káťa)', icon: '🏦', type: 'expense', default_budget: 2188 },
+  { name: 'Pojištění L (Káťa)', icon: '🛡️', type: 'expense', default_budget: 310 },
+  { name: 'Telefon O2 (Káťa)', icon: '📱', type: 'expense', default_budget: 700 },
+  { name: 'Drogerie (Káťa)', icon: '🧴', type: 'expense', default_budget: 2000 },
+  { name: 'Potraviny (Káťa)', icon: '🛒', type: 'expense', default_budget: 5000 },
+  { name: 'Pohonné hmoty (Káťa)', icon: '⛽', type: 'expense', default_budget: 3500 },
+  { name: 'Jídlo v práci (Káťa)', icon: '🍱', type: 'expense', default_budget: 2600 },
+  { name: 'Spotify (Káťa)', icon: '🎵', type: 'expense', default_budget: 185 },
+  { name: 'Osobní (Káťa)', icon: '🧑', type: 'expense', default_budget: 4000 },
+
+  { name: 'Telefon (Viki)', icon: '📱', type: 'expense', default_budget: 1300 },
+  { name: 'Potraviny (Viki)', icon: '🛒', type: 'expense', default_budget: 5000 },
+  { name: 'Pojistky auta (Viki)', icon: '🚗', type: 'expense', default_budget: 1300 },
+  { name: 'Jídlo psi (Viki)', icon: '🐶', type: 'expense', default_budget: 2500 },
+  { name: 'Jídlo v práci (Viki)', icon: '🍱', type: 'expense', default_budget: 800 },
+  { name: 'Předplatné (Viki)', icon: '📲', type: 'expense', default_budget: 1574 },
+  { name: 'Nájem (Viki)', icon: '🏠', type: 'expense', default_budget: 22175 },
+  { name: 'Osobní (Viki)', icon: '👩', type: 'expense', default_budget: 4000 },
+
   { name: 'Výplata Káťa', icon: '💼', type: 'income' },
   { name: 'Výplata Viki', icon: '💼', type: 'income' },
   { name: 'Příjem', icon: '💰', type: 'income' },
 ];
 const DEFAULT_SUBCATEGORY_LIBRARY = {
-  'Nájem': ['Nájem', 'Elektřina', 'Služby'],
-  'Potraviny': ['Penny', 'Lidl', 'Albert', 'Tesco'],
-  'TV/Internet': ['Vodafone', 'O2'],
-  'Předplatné': ['Netflix', 'ChatGPT', 'Oneplay', 'iCloud', 'Google Cloud'],
+  'Nájem (Viki)': ['Nájem', 'Elektřina', 'Služby'],
+  'Potraviny (Viki)': ['Penny', 'Lidl', 'Albert', 'Tesco'],
+  'Potraviny (Káťa)': ['Penny', 'Lidl', 'Albert', 'Tesco'],
+  'Telefon (Viki)': ['Vodafone'],
+  'Telefon O2 (Káťa)': ['O2'],
+  'Předplatné (Viki)': ['Netflix', 'ChatGPT', 'Oneplay', 'iCloud'],
+  'Pojistky auta (Viki)': ['Modrá', 'Černá'],
+  'Jídlo psi (Viki)': ['Meggie', 'Džejna'],
   'Příjem': ['Veru K.', 'Veru G.', 'Ostatní'],
-  'Úvěr': ['Úvěr 1', 'Úvěr 2', 'Úvěr 3'],
-  'Pohonné hmoty': ['Modrá', 'Černá'],
-  'Psi': ['Meggie', 'Džejna'],
+  'Úvěr 1 (Káťa)': ['Splátka'],
+  'Úvěr 2 (Káťa)': ['Splátka'],
+  'Úvěr 3 (Káťa)': ['Splátka'],
 };
 const DEFAULT_TRANSFER_PLAN = {
   kata_loan_1: 6596,
@@ -305,6 +321,7 @@ function getPersonBudgetResponsibility(period) {
   if (!period?.id) return result;
 
   const expenseCategories = state.categories.filter((category) => category.active !== false && category.type === 'expense');
+  const combinedByBase = new Map();
 
   expenseCategories.forEach((category) => {
     const metrics = computeCategoryMetrics(category, period);
@@ -359,30 +376,37 @@ function getPersonBudgetResponsibility(period) {
     const vikiRemaining = vikiBudget - vikiSpent;
     const kataRemaining = kataBudget - kataSpent;
 
-    const combinedRow = {
-      category,
-      vikiBudget,
-      kataBudget,
-      totalBudget: vikiBudget + kataBudget,
-      vikiSpent,
-      kataSpent,
-      totalSpent: vikiSpent + kataSpent,
-      remaining: vikiRemaining + kataRemaining,
+    const baseName = getCategoryBaseName(category.name);
+    const combinedRow = combinedByBase.get(baseName) || {
+      category: { ...category, name: baseName },
+      vikiBudget: 0,
+      kataBudget: 0,
+      totalBudget: 0,
+      vikiSpent: 0,
+      kataSpent: 0,
+      totalSpent: 0,
+      remaining: 0,
     };
+    combinedRow.vikiBudget += vikiBudget;
+    combinedRow.kataBudget += kataBudget;
+    combinedRow.totalBudget += vikiBudget + kataBudget;
+    combinedRow.vikiSpent += vikiSpent;
+    combinedRow.kataSpent += kataSpent;
+    combinedRow.totalSpent += vikiSpent + kataSpent;
+    combinedRow.remaining += vikiRemaining + kataRemaining;
+    combinedByBase.set(baseName, combinedRow);
 
     result.viki.assignedFromIncome += vikiAssigned;
     result.viki.available += vikiBudget;
     result.viki.spent += vikiSpent;
     result.viki.remaining += vikiRemaining;
-    result.viki.categories.push({ category, available: vikiBudget, spent: vikiSpent, remaining: vikiRemaining });
+    result.viki.categories.push({ category: { ...category, name: baseName }, available: vikiBudget, spent: vikiSpent, remaining: vikiRemaining });
 
     result.kata.assignedFromIncome += kataAssigned;
     result.kata.available += kataBudget;
     result.kata.spent += kataSpent;
     result.kata.remaining += kataRemaining;
-    result.kata.categories.push({ category, available: kataBudget, spent: kataSpent, remaining: kataRemaining });
-
-    result.combined.push(combinedRow);
+    result.kata.categories.push({ category: { ...category, name: baseName }, available: kataBudget, spent: kataSpent, remaining: kataRemaining });
   });
 
   result.viki.categories = result.viki.categories
@@ -391,7 +415,7 @@ function getPersonBudgetResponsibility(period) {
   result.kata.categories = result.kata.categories
     .filter((row) => Math.abs(row.available) > 0.009 || Math.abs(row.spent) > 0.009)
     .sort((a, b) => safeNumber(b.available) - safeNumber(a.available));
-  result.combined = result.combined
+  result.combined = Array.from(combinedByBase.values())
     .filter((row) => Math.abs(row.totalBudget) > 0.009 || Math.abs(row.totalSpent) > 0.009)
     .sort((a, b) => safeNumber(b.totalBudget) - safeNumber(a.totalBudget));
 
@@ -990,16 +1014,22 @@ function normalizeLabel(value) {
     .toLowerCase();
 }
 
+function getCategoryBaseName(categoryName) {
+  return String(categoryName || '').replace(/\s*\((Viki|Káťa)\)\s*$/i, '').trim();
+}
+
+function getCategoryOwnerByName(categoryName) {
+  const normalized = normalizeLabel(categoryName);
+  if (normalized.endsWith('(viki)')) return 'viki';
+  if (normalized.endsWith('(kata)')) return 'kata';
+  return null;
+}
+
 function getCategoryAccountGroup(category) {
   if (!category || category.type !== 'expense') return 'shared';
   if (isCategorySplitEnabled(category)) return 'shared';
-
-  const name = normalizeLabel(category.name);
-  const vikiNames = ['najem', 'psi', 'tv/internet', 'predplatne', 'osobni viki', 'telefon viki'];
-  const kataNames = ['drogerie', 'pohonne hmoty', 'uver', 'uvery', 'telefon kata', 'spotify', 'pojisteni', 'jidlo v praci', 'osobni kata'];
-
-  if (vikiNames.some((label) => name.includes(label))) return 'viki';
-  if (kataNames.some((label) => name.includes(label))) return 'kata';
+  const owner = getCategoryOwnerByName(category.name);
+  if (owner === 'viki' || owner === 'kata') return owner;
   return 'shared';
 }
 
@@ -1476,25 +1506,49 @@ async function cleanupDuplicatePersonalCategories() {
 
 async function ensureDefaultCategoryLibrary() {
   if (!state.household?.id) return;
-  if (state.categories.length) return;
   const normalize = (value) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  const templateKeys = new Set(DEFAULT_CATEGORY_LIBRARY.map((template) => normalize(template.name)));
   const existingByName = new Map(state.categories.map((category) => [normalize(category.name), category]));
 
   for (const template of DEFAULT_CATEGORY_LIBRARY) {
-    if (existingByName.has(normalize(template.name))) continue;
+    const key = normalize(template.name);
+    const existing = existingByName.get(key);
+    if (existing?.id) {
+      await supabaseCall('PATCH', 'categories', { id: `eq.${existing.id}` }, {
+        icon: template.icon || '📦',
+        type: template.type || 'expense',
+        active: true,
+        default_budget: safeNumber(template.default_budget),
+        allocation_percent: 0,
+        split_by_person: false,
+        split_mode: 'none',
+        split_viki_amount: 0,
+        split_kata_amount: 0,
+      });
+      continue;
+    }
+
     await supabaseCall('POST', 'categories', {}, {
       household_id: state.household.id,
       name: template.name,
       icon: template.icon || '📦',
       type: template.type || 'expense',
       active: true,
-      default_budget: 0,
+      default_budget: safeNumber(template.default_budget),
       allocation_percent: 0,
-      split_by_person: template.split_by_person === true,
-      split_mode: template.split_mode || 'none',
-      split_viki_amount: safeNumber(template.split_viki_amount),
-      split_kata_amount: safeNumber(template.split_kata_amount),
+      split_by_person: false,
+      split_mode: 'none',
+      split_viki_amount: 0,
+      split_kata_amount: 0,
     });
+  }
+
+  for (const category of state.categories) {
+    if (category.type !== 'expense') continue;
+    const key = normalize(category.name);
+    if (templateKeys.has(key)) continue;
+    if (category.active === false) continue;
+    await supabaseCall('PATCH', 'categories', { id: `eq.${category.id}` }, { active: false });
   }
 }
 
@@ -1506,7 +1560,6 @@ async function ensureDefaultSubcategoryLibrary() {
     household_id: `eq.${state.household.id}`,
     order: 'name.asc',
   });
-  if ((existing || []).length) return;
   const existingKeys = new Set((existing || []).map((item) => `${item.category_id}::${String(item.name).toLowerCase()}`));
 
   for (const [categoryName, names] of Object.entries(DEFAULT_SUBCATEGORY_LIBRARY)) {
@@ -2338,7 +2391,6 @@ function renderDashboard() {
   const periodNext = periodIndex >= 0 && periodIndex < sortedPeriods.length - 1 ? sortedPeriods[periodIndex + 1] : null;
   const previousPeriod = periodPrev || state.periods.find((p) => p.id !== period?.id) || null;
   const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0,plannedTotal:0,freeCash:0,unbudgetedExpenses:0 };
-  const transfer = buildTransferSummary();
   const responsibility = getPersonBudgetResponsibility(period);
   const vikiIncome = period
     ? state.transactions
@@ -2351,50 +2403,6 @@ function renderDashboard() {
       .reduce((sum, transaction) => sum + safeNumber(transaction.amount), 0)
     : 0;
   const previousSummary = previousPeriod ? calculatePeriodSummary(previousPeriod) : null;
-  const expenseRows = period
-    ? state.categories
-      .filter((category) => category.active !== false)
-      .map((category) => {
-        const spent = getExpensesForCategory(category.id, period.id);
-        return { name: category.name, icon: category.icon || '📦', spent };
-      })
-      .filter((row) => row.spent > 0)
-      .sort((a, b) => b.spent - a.spent)
-      .slice(0, 6)
-    : [];
-  const incomeRows = period
-    ? Object.values(state.transactions
-      .filter((transaction) => transaction.period_id === period.id && transaction.type === 'income')
-      .reduce((acc, transaction) => {
-        const key = transaction.category_id || `person:${transaction.paid_by}`;
-        if (!acc[key]) {
-          const categoryName = transaction.category_id ? (getCategoryById(transaction.category_id)?.name || 'Bez kategorie') : `Příjem ${transaction.paid_by}`;
-          acc[key] = { name: categoryName, amount: 0 };
-        }
-        acc[key].amount += safeNumber(transaction.amount);
-        return acc;
-      }, {}))
-      .sort((a, b) => b.amount - a.amount)
-      .slice(0, 6)
-    : [];
-  const budgetRows = period
-    ? state.categories
-      .filter((category) => category.active !== false)
-      .map((category) => {
-        const metrics = computeCategoryMetrics(category, period);
-        return {
-          icon: category.icon || '📦',
-          name: category.name,
-          spent: metrics.expenses,
-          available: metrics.totalAvailable,
-        };
-      })
-      .filter((row) => row.available > 0 || row.spent > 0)
-      .sort((a, b) => b.spent - a.spent)
-      .slice(0, 6)
-    : [];
-  const expenseMax = expenseRows.reduce((max, row) => Math.max(max, row.spent), 0) || 1;
-  const incomeMax = incomeRows.reduce((max, row) => Math.max(max, row.amount), 0) || 1;
   return `
     <div class="container">
       <div class="card">
@@ -2428,8 +2436,6 @@ function renderDashboard() {
         <div class="stat-card"><div class="stat-label">Zbývá v rozpočtech</div><div class="stat-value">${formatCurrency(summary.remainingTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Bilance</div><div class="stat-value">${formatCurrency(summary.balance)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán rozpočtů</div><div class="stat-value">${formatCurrency(summary.plannedTotal)}</div></div>
-        <div class="stat-card"><div class="stat-label">Plán poslat Kátě</div><div class="stat-value">${formatCurrency(transfer.kataPlanTotal)}</div></div>
-        <div class="stat-card"><div class="stat-label">Plán Viki vedlejší účet</div><div class="stat-value">${formatCurrency(transfer.vikiSidePlanTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Výdaje mimo rozpočty</div><div class="stat-value">${formatCurrency(summary.unbudgetedExpenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Volné k rozdělení</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
       </div>
@@ -2445,42 +2451,16 @@ function renderDashboard() {
           ${renderCombinedCategoryBudgetTable(responsibility.combined)}
         </div>
       </div>
-      ${renderTransferOverview(period)}
-      <div class="grid grid-2" style="margin-top:16px;">
-        <div class="card">
-          <h3>Srovnání s předchozím období</h3>
-          ${previousSummary ? `
-            <div class="list">
-              <div class="list-item">Příjmy: ${formatCurrency(summary.incomes)} vs ${formatCurrency(previousSummary.incomes)}</div>
-              <div class="list-item">Výdaje: ${formatCurrency(summary.expenses)} vs ${formatCurrency(previousSummary.expenses)}</div>
-              <div class="list-item">Zbývající: ${formatCurrency(summary.remainingTotal)}</div>
-              <div class="list-item">Počet transakcí: ${state.transactions.filter((t) => t.period_id === period?.id).length}</div>
-            </div>
-          ` : '<div class="empty">Bez dat k porovnání</div>'}
-        </div>
-        <div class="card">
-          <h3>Obálky podle účtu</h3>
-          ${renderAccountEnvelopeGroups(period)}
-        </div>
-      </div>
-
-      <div class="grid grid-2" style="margin-top:16px;">
-        <div class="card">
-          <h3>Proklikávací graf výdajů</h3>
-          ${renderExpenseDrilldownChart(period)}
-        </div>
-        <div class="card">
-          <h3>Graf příjmů dle kategorií</h3>
-          ${incomeRows.length ? `<div class="mini-chart" style="margin-top:12px;">${incomeRows.map((row) => `<div class="mini-chart-row"><div class="mini-chart-label">💰 ${row.name}</div><div class="mini-chart-track income"><span style="width:${Math.max(8, Math.round((row.amount / incomeMax) * 100))}%"></span></div><div class="mini-chart-value">${formatCurrency(row.amount)}</div></div>`).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Zatím nejsou žádné příjmy v kategoriích.</div>'}
-        </div>
-      </div>
-
       <div class="card" style="margin-top:16px;">
-        <h3>Rozpočet vs. čerpání</h3>
-        ${budgetRows.length ? `<div class="list" style="margin-top:12px;">${budgetRows.map((row) => {
-          const ratio = row.available > 0 ? Math.round((row.spent / row.available) * 100) : 0;
-          return `<div class="budget-compare"><div class="budget-compare-header"><strong>${row.icon} ${row.name}</strong><span>${formatCurrency(row.spent)} / ${formatCurrency(row.available)}</span></div><div class="budget-compare-track"><span style="width:${Math.max(4, Math.min(100, ratio))}%"></span></div></div>`;
-        }).join('')}</div>` : '<div class="empty" style="margin-top:12px;">Pro zobrazení grafu vytvoř rozpočet a transakce v období.</div>'}
+        <h3>Srovnání s předchozím období</h3>
+        ${previousSummary ? `
+          <div class="list" style="margin-top:12px;">
+            <div class="list-item">Příjmy: ${formatCurrency(summary.incomes)} vs ${formatCurrency(previousSummary.incomes)}</div>
+            <div class="list-item">Výdaje: ${formatCurrency(summary.expenses)} vs ${formatCurrency(previousSummary.expenses)}</div>
+            <div class="list-item">Čerpání rozpočtů: ${formatCurrency(summary.spentTotal)} vs ${formatCurrency(previousSummary.spentTotal)}</div>
+            <div class="list-item">Zbývá v rozpočtech: ${formatCurrency(summary.remainingTotal)} vs ${formatCurrency(previousSummary.remainingTotal)}</div>
+          </div>
+        ` : '<div class="empty" style="margin-top:12px;">Bez dat k porovnání</div>'}
       </div>
     </div>
   `;
@@ -2638,7 +2618,6 @@ function renderSettings() {
   return `
     ${renderPeriods()}
     <div class="container" style="margin-top:16px;">
-      ${renderTransferPlanSettingsCard()}
       <div class="card" style="margin-bottom:16px;">
         <div class="row" style="justify-content: space-between; align-items:center;">
           <h2>Kategorie a podkategorie</h2>
@@ -2750,16 +2729,6 @@ function render() {
 function attachEvents() {
   document.querySelectorAll('[data-view]').forEach((btn) => btn.addEventListener('click', () => setView(btn.dataset.view)));
   document.querySelectorAll('[data-action="show-add-transaction"]').forEach((btn) => btn.addEventListener('click', () => showTransactionModal()));
-  document.querySelectorAll('[data-action="quick-add-kata-transfer"]').forEach((btn) => btn.addEventListener('click', () => showTransactionModal(null, {
-    type: 'expense',
-    paid_by: 'Viki',
-    note: TRANSFER_NOTE_TAGS.kata,
-  })));
-  document.querySelectorAll('[data-action="quick-add-viki-side-transfer"]').forEach((btn) => btn.addEventListener('click', () => showTransactionModal(null, {
-    type: 'expense',
-    paid_by: 'Viki',
-    note: TRANSFER_NOTE_TAGS.vikiSide,
-  })));
   document.querySelectorAll('[data-action="show-create-period"]').forEach((btn) => btn.addEventListener('click', () => showPeriodModal()));
   document.querySelectorAll('[data-action="show-create-category"]').forEach((btn) => btn.addEventListener('click', () => showCategoryModal()));
   document.querySelectorAll('[data-action="show-create-subcategory"]').forEach((btn) => btn.addEventListener('click', () => showSubcategoryModal()));
@@ -2847,14 +2816,6 @@ function attachEvents() {
     if (file) {
       importJsonBackup(file);
     }
-  });
-  document.getElementById('transfer-plan-form')?.addEventListener('submit', (event) => {
-    event.preventDefault();
-    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
-    const numericPayload = Object.fromEntries(Object.entries(payload).map(([key, value]) => [key, safeNumber(value)]));
-    saveTransferPlanToStorage(numericPayload);
-    state.status = { type: 'success', message: 'Převody mezi účty byly uloženy.' };
-    render();
   });
 }
 
