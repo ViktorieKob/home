@@ -90,6 +90,10 @@ const DEFAULT_TRANSFER_PLAN = {
   viki_oneplay: 298,
   viki_personal: 4000,
 };
+const TRANSFER_NOTE_TAGS = {
+  kata: '#prevod-kata',
+  vikiSide: '#prevod-viki-vedlejsi',
+};
 
 // Helper functions
 function formatCurrency(value) {
@@ -246,10 +250,74 @@ function buildTransferSummary() {
     { key: 'viki_personal', label: 'Osobní část Viki' },
   ].map((item) => ({ ...item, amount: safeNumber(plan[item.key]) }));
 
-  const kataTotal = kataItems.reduce((sum, item) => sum + item.amount, 0);
-  const vikiTransferTotal = vikiItems.reduce((sum, item) => sum + item.amount, 0);
+  const kataPlanTotal = kataItems.reduce((sum, item) => sum + item.amount, 0);
+  const vikiSidePlanTotal = vikiItems.reduce((sum, item) => sum + item.amount, 0);
 
-  return { kataItems, vikiItems, kataTotal, vikiTransferTotal };
+  return { kataItems, vikiItems, kataPlanTotal, vikiSidePlanTotal };
+}
+
+function transactionTextForMatching(transaction) {
+  const categoryName = getCategoryById(transaction.category_id)?.name || '';
+  const subcategoryName = getSubcategoryById(transaction.subcategory_id)?.name || '';
+  const text = `${transaction.note || ''} ${categoryName} ${subcategoryName}`;
+  return normalizeLabel(text);
+}
+
+function matchesAnyKeyword(text, keywords) {
+  return keywords.some((keyword) => text.includes(keyword));
+}
+
+function getTransferReality(period) {
+  if (!period?.id) {
+    return { kataSent: 0, vikiSideSent: 0 };
+  }
+
+  const tx = state.transactions.filter((transaction) => transaction.period_id === period.id);
+  const kataKeywords = ['prevod kata', 'prevod kate', 'poslano kate', 'kata'];
+  const vikiSideKeywords = ['vedlejsi ucet', 'vlastni ucet', 'jiny ucet', 'sporic', 'sporici'];
+
+  const kataExpenseSent = tx
+    .filter((transaction) => transaction.type === 'expense' && transaction.paid_by === 'Viki')
+    .filter((transaction) => {
+      const text = transactionTextForMatching(transaction);
+      return text.includes(normalizeLabel(TRANSFER_NOTE_TAGS.kata)) || matchesAnyKeyword(text, kataKeywords);
+    })
+    .reduce((sum, transaction) => sum + safeNumber(transaction.amount), 0);
+
+  const kataIncomeReceived = tx
+    .filter((transaction) => transaction.type === 'income' && transaction.paid_by === 'Káťa')
+    .filter((transaction) => {
+      const text = transactionTextForMatching(transaction);
+      return text.includes(normalizeLabel(TRANSFER_NOTE_TAGS.kata)) || matchesAnyKeyword(text, kataKeywords);
+    })
+    .reduce((sum, transaction) => sum + safeNumber(transaction.amount), 0);
+
+  const vikiSideSent = tx
+    .filter((transaction) => transaction.type === 'expense' && transaction.paid_by === 'Viki')
+    .filter((transaction) => {
+      const text = transactionTextForMatching(transaction);
+      return text.includes(normalizeLabel(TRANSFER_NOTE_TAGS.vikiSide)) || matchesAnyKeyword(text, vikiSideKeywords);
+    })
+    .reduce((sum, transaction) => sum + safeNumber(transaction.amount), 0);
+
+  // If both sides are entered (expense+income), use the higher side as conservative real sent amount.
+  const kataSent = Math.max(kataExpenseSent, kataIncomeReceived);
+  return { kataSent, vikiSideSent };
+}
+
+function renderEnvelopeRows(rows) {
+  if (!rows.length) {
+    return '<div class="empty">Žádné položky</div>';
+  }
+  return rows.map((row) => `
+    <button class="account-envelope-item" type="button" data-category-id="${row.category.id}">
+      <div class="account-envelope-header">
+        <strong>${row.category.icon || '📦'} ${row.category.name}${row.person ? ` · ${row.person}` : ''}</strong>
+        <span>${formatCurrency(row.remaining)}</span>
+      </div>
+      <div class="account-envelope-meta">${formatCurrency(row.spent)} / ${formatCurrency(row.available)} · Převod ${formatCurrency(row.rollover)}</div>
+    </button>
+  `).join('');
 }
 function formatApiErrorMessage(error) {
   const message = String(error?.message || error || 'Neznámá chyba');
@@ -877,28 +945,68 @@ function renderAccountEnvelopeGroups(period) {
 
 function renderTransferOverview(period) {
   const transfer = buildTransferSummary();
+  const reality = getTransferReality(period);
+  const groups = getAccountEnvelopeGroups(period);
+  const kataDiff = transfer.kataPlanTotal - reality.kataSent;
+  const vikiSideDiff = transfer.vikiSidePlanTotal - reality.vikiSideSent;
+
   return `
     <div class="card" style="margin-top:16px;">
-      <div class="row" style="justify-content: space-between; align-items:center;">
-        <h3>Převod Kátě (${period?.name || 'období'})</h3>
-        <span class="badge badge-success">${formatCurrency(transfer.kataTotal)}</span>
+      <div class="row" style="justify-content: space-between; align-items:center; margin-bottom:10px;">
+        <h3>Přehled účtů (${period?.name || 'období'})</h3>
       </div>
-      <div class="grid grid-2" style="margin-top:12px;">
+      <div class="grid grid-2" style="margin-top:8px;">
         <div class="list-item">
-          <strong>Z čeho se částka skládá</strong>
+          <div class="row" style="justify-content: space-between; align-items:center;">
+            <strong>Rozpočet Káťa</strong>
+            <span class="badge badge-success">Plán ${formatCurrency(transfer.kataPlanTotal)}</span>
+          </div>
           <div class="list" style="margin-top:10px;">
-            ${transfer.kataItems.map((item) => `<div class="list-item" style="padding:8px 10px;"><span>${item.label}</span><strong style="float:right;">${formatCurrency(item.amount)}</strong></div>`).join('')}
+            <div class="list-item"><span>Reálně posláno Kátě</span><strong>${formatCurrency(reality.kataSent)}</strong></div>
+            <div class="list-item"><span>Rozdíl (plán - realita)</span><strong>${formatCurrency(kataDiff)}</strong></div>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <button class="btn btn-secondary" type="button" data-action="quick-add-kata-transfer">+ Zapsat převod Kátě</button>
+          </div>
+          <p style="margin-top:8px; color:var(--muted);">Pro automatické párování zadej do poznámky transakce ${TRANSFER_NOTE_TAGS.kata}.</p>
+          <div class="list" style="margin-top:10px;">
+            ${transfer.kataItems.map((item) => `<div class="list-item" style="padding:8px 10px;"><span>${item.label}</span><strong>${formatCurrency(item.amount)}</strong></div>`).join('')}
+          </div>
+          <div class="list" style="margin-top:10px;">
+            ${renderEnvelopeRows(groups.kata.rows)}
           </div>
         </div>
         <div class="list-item">
-          <strong>Převody Viki na vedlejší účet</strong>
-          <div style="margin-top:6px; color:var(--muted);">${formatCurrency(transfer.vikiTransferTotal)}</div>
+          <div class="row" style="justify-content: space-between; align-items:center;">
+            <strong>Rozpočet Viki</strong>
+            <span class="badge">Obálky ${formatCurrency(groups.viki.available)}</span>
+          </div>
           <div class="list" style="margin-top:10px;">
-            ${transfer.vikiItems.map((item) => `<div class="list-item" style="padding:8px 10px;"><span>${item.label}</span><strong style="float:right;">${formatCurrency(item.amount)}</strong></div>`).join('')}
+            <div class="list-item"><span>Vyčerpáno</span><strong>${formatCurrency(groups.viki.spent)}</strong></div>
+            <div class="list-item"><span>Zbývá</span><strong>${formatCurrency(groups.viki.remaining)}</strong></div>
+          </div>
+          <div class="list" style="margin-top:10px;">
+            ${renderEnvelopeRows(groups.viki.rows)}
           </div>
         </div>
       </div>
-      <p style="margin-top:10px; color:var(--muted);">Pozn.: částka „Poslat Kátě" je plán měsíčního převodu dle nastavení níže, ne automatický výpočet z reálné útraty.</p>
+      <div class="list-item" style="margin-top:12px;">
+        <div class="row" style="justify-content: space-between; align-items:center;">
+          <strong>Viki převod na vedlejší účet (odděleně)</strong>
+          <span class="badge">Plán ${formatCurrency(transfer.vikiSidePlanTotal)}</span>
+        </div>
+        <div class="list" style="margin-top:10px;">
+          <div class="list-item"><span>Reálně převedeno</span><strong>${formatCurrency(reality.vikiSideSent)}</strong></div>
+          <div class="list-item"><span>Rozdíl (plán - realita)</span><strong>${formatCurrency(vikiSideDiff)}</strong></div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button class="btn btn-secondary" type="button" data-action="quick-add-viki-side-transfer">+ Zapsat převod na vedlejší účet</button>
+        </div>
+        <p style="margin-top:8px; color:var(--muted);">Pro automatické párování zadej do poznámky transakce ${TRANSFER_NOTE_TAGS.vikiSide}.</p>
+        <div class="list" style="margin-top:10px;">
+          ${transfer.vikiItems.map((item) => `<div class="list-item" style="padding:8px 10px;"><span>${item.label}</span><strong>${formatCurrency(item.amount)}</strong></div>`).join('')}
+        </div>
+      </div>
     </div>
   `;
 }
@@ -928,9 +1036,9 @@ function renderTransferPlanSettingsCard() {
     <div class="card" style="margin-bottom:16px;">
       <div class="row" style="justify-content: space-between; align-items:center;">
         <h2>Převody mezi účty</h2>
-        <span class="badge badge-success">${formatCurrency(buildTransferSummary().kataTotal)} k poslání Kátě</span>
+        <span class="badge badge-success">${formatCurrency(buildTransferSummary().kataPlanTotal)} plán Kátě</span>
       </div>
-      <p style="margin-top:8px; color:var(--muted);">Nastav měsíční částky. Dashboard pak ukáže přesně kolik Kátě poslat a z čeho se částka skládá.</p>
+      <p style="margin-top:8px; color:var(--muted);">Nastav měsíční plán odděleně pro Káťu a pro převod Viki na vedlejší účet.</p>
       <form id="transfer-plan-form" class="grid grid-2" style="margin-top:12px;">
         ${fields.map((field) => `<label>${field.label}<input type="number" step="0.01" min="0" name="${field.key}" value="${safeNumber(plan[field.key])}"></label>`).join('')}
         <div class="row" style="grid-column:1 / -1; margin-top:4px;">
@@ -2122,7 +2230,8 @@ function renderDashboard() {
         <div class="stat-card"><div class="stat-label">Výdaje</div><div class="stat-value">${formatCurrency(summary.expenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Bilance</div><div class="stat-value">${formatCurrency(summary.balance)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán rozpočtů</div><div class="stat-value">${formatCurrency(summary.plannedTotal)}</div></div>
-        <div class="stat-card"><div class="stat-label">Poslat Kátě</div><div class="stat-value">${formatCurrency(transfer.kataTotal)}</div></div>
+        <div class="stat-card"><div class="stat-label">Plán poslat Kátě</div><div class="stat-value">${formatCurrency(transfer.kataPlanTotal)}</div></div>
+        <div class="stat-card"><div class="stat-label">Plán Viki vedlejší účet</div><div class="stat-value">${formatCurrency(transfer.vikiSidePlanTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Výdaje mimo rozpočty</div><div class="stat-value">${formatCurrency(summary.unbudgetedExpenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Volné k rozdělení</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
       </div>
@@ -2431,6 +2540,16 @@ function render() {
 function attachEvents() {
   document.querySelectorAll('[data-view]').forEach((btn) => btn.addEventListener('click', () => setView(btn.dataset.view)));
   document.querySelectorAll('[data-action="show-add-transaction"]').forEach((btn) => btn.addEventListener('click', () => showTransactionModal()));
+  document.querySelectorAll('[data-action="quick-add-kata-transfer"]').forEach((btn) => btn.addEventListener('click', () => showTransactionModal(null, {
+    type: 'expense',
+    paid_by: 'Viki',
+    note: TRANSFER_NOTE_TAGS.kata,
+  })));
+  document.querySelectorAll('[data-action="quick-add-viki-side-transfer"]').forEach((btn) => btn.addEventListener('click', () => showTransactionModal(null, {
+    type: 'expense',
+    paid_by: 'Viki',
+    note: TRANSFER_NOTE_TAGS.vikiSide,
+  })));
   document.querySelectorAll('[data-action="show-create-period"]').forEach((btn) => btn.addEventListener('click', () => showPeriodModal()));
   document.querySelectorAll('[data-action="show-create-category"]').forEach((btn) => btn.addEventListener('click', () => showCategoryModal()));
   document.querySelectorAll('[data-action="show-create-subcategory"]').forEach((btn) => btn.addEventListener('click', () => showSubcategoryModal()));
