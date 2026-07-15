@@ -339,6 +339,25 @@ function computeNextRecurringDate(rule, fromDate) {
   }
   return null;
 }
+function isCategorySplitEnabled(category) {
+  const splitMode = category?.split_mode || (category?.split_by_person ? 'half' : 'none');
+  return splitMode !== 'none';
+}
+function computeCategoryRolloverAmount(category, period) {
+  if (!period) return 0;
+  const previousPeriod = getPreviousPeriod(period);
+  if (!previousPeriod) return 0;
+
+  if (isCategorySplitEnabled(category)) {
+    const previousSplit = computeCategoryPersonSplit(category, previousPeriod.id);
+    if (previousSplit) {
+      return safeNumber(previousSplit.vikiRemaining) + safeNumber(previousSplit.kataRemaining);
+    }
+  }
+
+  const previousMetrics = computeCategoryMetrics(category, previousPeriod);
+  return safeNumber(previousMetrics?.remaining ?? 0);
+}
 function computeCategoryMetrics(category, period) {
   if (!period) {
     const fallbackBudget = safeNumber(category.default_budget);
@@ -347,9 +366,7 @@ function computeCategoryMetrics(category, period) {
   const expenses = getExpensesForCategory(category.id, period.id);
   const periodBudget = getPeriodBudgetRecord(category.id, period.id);
   const baseBudget = safeNumber(periodBudget?.base_budget ?? computeTargetBudgetForCategory(category, period.id));
-  const previousPeriod = getPreviousPeriod(period);
-  const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
-  const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
+  const rolloverAmount = safeNumber(computeCategoryRolloverAmount(category, period));
   const manualAdjustment = safeNumber(periodBudget?.manual_adjustment ?? 0);
   const computedAvailable = baseBudget + rolloverAmount + manualAdjustment;
   const totalAvailable = computedAvailable;
@@ -364,15 +381,54 @@ function computeCategoryPersonSplit(category, periodId, totalBudget) {
   if (splitMode === 'none') {
     return null;
   }
-  const safeBudget = safeNumber(totalBudget);
-  let vikiBudget = safeBudget / 2;
-  let kataBudget = safeBudget / 2;
+
+  const period = getPeriodById(periodId);
+  if (!period) return null;
+
+  const metrics = computeCategoryMetrics(category, period);
+  const baseBudget = safeNumber(metrics.baseBudget);
+  const manualAdjustment = safeNumber(metrics.manualAdjustment);
+
+  let vikiBaseBudget = baseBudget / 2;
+  let kataBaseBudget = baseBudget / 2;
   if (splitMode === 'custom') {
-    vikiBudget = safeNumber(category.split_viki_amount);
-    kataBudget = safeNumber(category.split_kata_amount);
+    vikiBaseBudget = safeNumber(category.split_viki_amount);
+    kataBaseBudget = safeNumber(category.split_kata_amount);
   }
+
+  let rolloverVikiAmount = 0;
+  let rolloverKataAmount = 0;
+  const previousPeriod = getPreviousPeriod(period);
+  if (previousPeriod) {
+    const previousSplit = computeCategoryPersonSplit(category, previousPeriod.id);
+    if (previousSplit) {
+      rolloverVikiAmount = safeNumber(previousSplit.vikiRemaining);
+      rolloverKataAmount = safeNumber(previousSplit.kataRemaining);
+    } else {
+      const fallbackRollover = safeNumber(computeCategoryMetrics(category, previousPeriod).remaining);
+      rolloverVikiAmount = fallbackRollover / 2;
+      rolloverKataAmount = fallbackRollover / 2;
+    }
+  }
+
+  const beforeManualVikiBudget = vikiBaseBudget + rolloverVikiAmount;
+  const beforeManualKataBudget = kataBaseBudget + rolloverKataAmount;
+  const positiveBeforeManualViki = Math.max(beforeManualVikiBudget, 0);
+  const positiveBeforeManualKata = Math.max(beforeManualKataBudget, 0);
+  const positiveBeforeManualTotal = positiveBeforeManualViki + positiveBeforeManualKata;
+  const manualVikiRatio = positiveBeforeManualTotal > 0
+    ? (positiveBeforeManualViki / positiveBeforeManualTotal)
+    : 0.5;
+  const manualVikiAmount = manualAdjustment * manualVikiRatio;
+  const manualKataAmount = manualAdjustment - manualVikiAmount;
+
+  const vikiBudget = beforeManualVikiBudget + manualVikiAmount;
+  const kataBudget = beforeManualKataBudget + manualKataAmount;
   const personSpend = { viki: 0, kata: 0 };
-  const ratioTotal = vikiBudget + kataBudget;
+  const positiveVikiBudget = Math.max(vikiBudget, 0);
+  const positiveKataBudget = Math.max(kataBudget, 0);
+  const ratioTotal = positiveVikiBudget + positiveKataBudget;
+  const sharedVikiRatio = ratioTotal > 0 ? (positiveVikiBudget / ratioTotal) : 0.5;
 
   state.transactions
     .filter((transaction) => transaction.period_id === periodId && transaction.category_id === category.id && transaction.type === 'expense')
@@ -383,14 +439,20 @@ function computeCategoryPersonSplit(category, periodId, totalBudget) {
       } else if (transaction.paid_by === 'Káťa') {
         personSpend.kata += amount;
       } else {
-        const vikiRatio = ratioTotal > 0 ? (vikiBudget / ratioTotal) : 0.5;
-        personSpend.viki += amount * vikiRatio;
-        personSpend.kata += amount * (1 - vikiRatio);
+        personSpend.viki += amount * sharedVikiRatio;
+        personSpend.kata += amount * (1 - sharedVikiRatio);
       }
     });
 
   return {
     mode: splitMode,
+    totalBudget: safeNumber(totalBudget ?? metrics.totalAvailable),
+    baseBudget,
+    manualAdjustment,
+    rolloverVikiAmount,
+    rolloverKataAmount,
+    manualVikiAmount,
+    manualKataAmount,
     vikiBudget,
     kataBudget,
     vikiSpent: personSpend.viki,
@@ -430,14 +492,11 @@ async function syncPeriodBudgetRollovers() {
   let hasChanges = false;
 
   for (const period of periodsAsc) {
-    const previousPeriod = getPreviousPeriod(period);
-
     for (const category of categories) {
       const existing = getPeriodBudgetRecord(category.id, period.id);
       const baseBudget = roundMoney(existing?.base_budget ?? computeTargetBudgetForCategory(category, period.id));
       const manualAdjustment = roundMoney(existing?.manual_adjustment ?? 0);
-      const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
-      const rolloverAmount = roundMoney(previousMetrics?.remaining ?? 0);
+      const rolloverAmount = roundMoney(computeCategoryRolloverAmount(category, period));
       const totalAvailable = roundMoney(baseBudget + manualAdjustment + rolloverAmount);
 
       if (!existing?.id) {
@@ -529,8 +588,7 @@ async function createPeriodBudgetsForPeriod(period) {
     if (!activeCategories.length) return;
 
     const budgetRows = activeCategories.map((category) => {
-      const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
-      const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
+      const rolloverAmount = safeNumber(computeCategoryRolloverAmount(category, period));
       const baseBudget = computeTargetBudgetForCategory(category, period.id);
       const manualAdjustment = 0;
       const totalAvailable = baseBudget + rolloverAmount + manualAdjustment;
@@ -559,9 +617,7 @@ async function createBudgetForCategoryInCurrentPeriod(category) {
     const existing = getPeriodBudgetRecord(category.id, period.id);
     if (existing) return;
 
-    const previousPeriod = getPreviousPeriod(period);
-    const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
-    const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
+    const rolloverAmount = safeNumber(computeCategoryRolloverAmount(category, period));
     const baseBudget = computeTargetBudgetForCategory(category, period.id);
 
     await supabaseCall('POST', 'period_budgets', {}, {
@@ -591,9 +647,7 @@ async function saveCategoryBudgetForCurrentPeriod(categoryId, baseBudget, manual
 
   try {
     const existing = getPeriodBudgetRecord(category.id, period.id);
-    const previousPeriod = getPreviousPeriod(period);
-    const previousMetrics = previousPeriod ? computeCategoryMetrics(category, previousPeriod) : null;
-    const rolloverAmount = safeNumber(previousMetrics?.remaining ?? 0);
+    const rolloverAmount = safeNumber(computeCategoryRolloverAmount(category, period));
     const totalAvailable = safeNumber(baseBudget) + safeNumber(rolloverAmount) + safeNumber(manualAdjustment);
 
     if (existing?.id) {
@@ -1616,7 +1670,7 @@ function renderDashboard() {
                     <span>Vyčerpáno ${formatCurrency(metrics.expenses)}</span>
                     <span>Zbývá ${formatCurrency(metrics.remaining)}</span>
                   </div>
-                  ${split ? `<div class="split-grid"><div class="split-item"><strong>Viki</strong><span>${formatCurrency(split.vikiRemaining)} zbývá</span><small>${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)}</small></div><div class="split-item"><strong>Káťa</strong><span>${formatCurrency(split.kataRemaining)} zbývá</span><small>${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)}</small></div></div>` : ''}
+                  ${split ? `<div class="split-grid"><div class="split-item"><strong>Viki</strong><span>${formatCurrency(split.vikiRemaining)} zbývá</span><small>${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)}</small><small>Převod ${formatCurrency(split.rolloverVikiAmount)}</small></div><div class="split-item"><strong>Káťa</strong><span>${formatCurrency(split.kataRemaining)} zbývá</span><small>${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)}</small><small>Převod ${formatCurrency(split.rolloverKataAmount)}</small></div></div>` : ''}
                 </div>`;
             }).join('') : '<div class="empty">Žádné kategorie</div>'}
           </div>
@@ -2329,7 +2383,7 @@ function showCategoryDetailModal(categoryId) {
         <div class="list-item">Celkem k dispozici: ${formatCurrency(metrics.totalAvailable)}</div>
         <div class="list-item">Vyčerpáno: ${formatCurrency(metrics.expenses)}</div>
         <div class="list-item">Zbývá: ${formatCurrency(metrics.remaining)}</div>
-        ${split ? `<div class="list-item"><strong>Rozdělení dle osoby</strong><div style="margin-top:8px;">Viki: ${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)} · zbývá ${formatCurrency(split.vikiRemaining)}</div><div style="margin-top:6px;">Káťa: ${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)} · zbývá ${formatCurrency(split.kataRemaining)}</div></div>` : ''}
+        ${split ? `<div class="list-item"><strong>Rozdělení dle osoby</strong><div style="margin-top:8px;">Viki: ${formatCurrency(split.vikiSpent)} / ${formatCurrency(split.vikiBudget)} · zbývá ${formatCurrency(split.vikiRemaining)} · převod ${formatCurrency(split.rolloverVikiAmount)}</div><div style="margin-top:6px;">Káťa: ${formatCurrency(split.kataSpent)} / ${formatCurrency(split.kataBudget)} · zbývá ${formatCurrency(split.kataRemaining)} · převod ${formatCurrency(split.rolloverKataAmount)}</div></div>` : ''}
       </div>
       ${period ? `
         <div class="card" style="margin-top:12px;">
