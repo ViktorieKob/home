@@ -875,6 +875,72 @@ function renderAccountEnvelopeGroups(period) {
   `;
 }
 
+function renderTransferOverview(period) {
+  const transfer = buildTransferSummary();
+  return `
+    <div class="card" style="margin-top:16px;">
+      <div class="row" style="justify-content: space-between; align-items:center;">
+        <h3>Převod Kátě (${period?.name || 'období'})</h3>
+        <span class="badge badge-success">${formatCurrency(transfer.kataTotal)}</span>
+      </div>
+      <div class="grid grid-2" style="margin-top:12px;">
+        <div class="list-item">
+          <strong>Z čeho se částka skládá</strong>
+          <div class="list" style="margin-top:10px;">
+            ${transfer.kataItems.map((item) => `<div class="list-item" style="padding:8px 10px;"><span>${item.label}</span><strong style="float:right;">${formatCurrency(item.amount)}</strong></div>`).join('')}
+          </div>
+        </div>
+        <div class="list-item">
+          <strong>Převody Viki na vedlejší účet</strong>
+          <div style="margin-top:6px; color:var(--muted);">${formatCurrency(transfer.vikiTransferTotal)}</div>
+          <div class="list" style="margin-top:10px;">
+            ${transfer.vikiItems.map((item) => `<div class="list-item" style="padding:8px 10px;"><span>${item.label}</span><strong style="float:right;">${formatCurrency(item.amount)}</strong></div>`).join('')}
+          </div>
+        </div>
+      </div>
+      <p style="margin-top:10px; color:var(--muted);">Pozn.: částka „Poslat Kátě" je plán měsíčního převodu dle nastavení níže, ne automatický výpočet z reálné útraty.</p>
+    </div>
+  `;
+}
+
+function renderTransferPlanSettingsCard() {
+  const plan = getTransferPlan();
+  const fields = [
+    { key: 'kata_loan_1', label: 'Úvěr 1 (Káťa)' },
+    { key: 'kata_loan_2', label: 'Úvěr 2 (Káťa)' },
+    { key: 'kata_loan_3', label: 'Úvěr 3 (Káťa)' },
+    { key: 'kata_insurance_l', label: 'Pojištění L (Káťa)' },
+    { key: 'kata_phone_o2', label: 'Telefon O2 (Káťa)' },
+    { key: 'kata_drogerie', label: 'Drogerie (Káťa)' },
+    { key: 'kata_food_share', label: 'Potraviny - část Káťa' },
+    { key: 'kata_fuel', label: 'Pohonné hmoty (Káťa)' },
+    { key: 'kata_work_food', label: 'Jídlo v práci - Káťa' },
+    { key: 'kata_spotify', label: 'Spotify (Káťa)' },
+    { key: 'viki_phone', label: 'Telefon Viki' },
+    { key: 'viki_chatgpt', label: 'ChatGPT' },
+    { key: 'viki_icloud', label: 'iCloud' },
+    { key: 'viki_netflix', label: 'Netflix' },
+    { key: 'viki_oneplay', label: 'Oneplay' },
+    { key: 'viki_personal', label: 'Osobní část Viki' },
+  ];
+
+  return `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="row" style="justify-content: space-between; align-items:center;">
+        <h2>Převody mezi účty</h2>
+        <span class="badge badge-success">${formatCurrency(buildTransferSummary().kataTotal)} k poslání Kátě</span>
+      </div>
+      <p style="margin-top:8px; color:var(--muted);">Nastav měsíční částky. Dashboard pak ukáže přesně kolik Kátě poslat a z čeho se částka skládá.</p>
+      <form id="transfer-plan-form" class="grid grid-2" style="margin-top:12px;">
+        ${fields.map((field) => `<label>${field.label}<input type="number" step="0.01" min="0" name="${field.key}" value="${safeNumber(plan[field.key])}"></label>`).join('')}
+        <div class="row" style="grid-column:1 / -1; margin-top:4px;">
+          <button class="btn btn-primary" type="submit">Uložit převody</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
 function roundMoney(value) {
   return Math.round(safeNumber(value) * 100) / 100;
 }
@@ -1305,6 +1371,7 @@ async function loadAllData() {
   render();
   try {
     await ensureDefaultHousehold();
+    loadTransferPlanFromStorage();
     const householdId = state.household?.id;
     if (!householdId) {
       throw new Error('Domácnost nebyla nalezena.');
@@ -1968,6 +2035,7 @@ function renderDashboard() {
   const periodNext = periodIndex >= 0 && periodIndex < sortedPeriods.length - 1 ? sortedPeriods[periodIndex + 1] : null;
   const previousPeriod = periodPrev || state.periods.find((p) => p.id !== period?.id) || null;
   const summary = period ? calculatePeriodSummary(period) : { incomes:0,expenses:0,balance:0,categoryBudgetTotal:0,rolloverTotal:0,availableTotal:0,spentTotal:0,remainingTotal:0,plannedTotal:0,freeCash:0,unbudgetedExpenses:0 };
+  const transfer = buildTransferSummary();
   const vikiIncome = period
     ? state.transactions
       .filter((transaction) => transaction.period_id === period.id && transaction.type === 'income' && transaction.paid_by === 'Viki')
@@ -2054,9 +2122,11 @@ function renderDashboard() {
         <div class="stat-card"><div class="stat-label">Výdaje</div><div class="stat-value">${formatCurrency(summary.expenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Bilance</div><div class="stat-value">${formatCurrency(summary.balance)}</div></div>
         <div class="stat-card"><div class="stat-label">Plán rozpočtů</div><div class="stat-value">${formatCurrency(summary.plannedTotal)}</div></div>
+        <div class="stat-card"><div class="stat-label">Poslat Kátě</div><div class="stat-value">${formatCurrency(transfer.kataTotal)}</div></div>
         <div class="stat-card"><div class="stat-label">Výdaje mimo rozpočty</div><div class="stat-value">${formatCurrency(summary.unbudgetedExpenses)}</div></div>
         <div class="stat-card"><div class="stat-label">Volné k rozdělení</div><div class="stat-value">${formatCurrency(summary.freeCash)}</div></div>
       </div>
+      ${renderTransferOverview(period)}
       <div class="grid grid-2" style="margin-top:16px;">
         <div class="card">
           <h3>Srovnání s předchozím období</h3>
@@ -2249,6 +2319,7 @@ function renderSettings() {
   return `
     ${renderPeriods()}
     <div class="container" style="margin-top:16px;">
+      ${renderTransferPlanSettingsCard()}
       <div class="card" style="margin-bottom:16px;">
         <div class="row" style="justify-content: space-between; align-items:center;">
           <h2>Kategorie a podkategorie</h2>
@@ -2447,6 +2518,14 @@ function attachEvents() {
     if (file) {
       importJsonBackup(file);
     }
+  });
+  document.getElementById('transfer-plan-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const numericPayload = Object.fromEntries(Object.entries(payload).map(([key, value]) => [key, safeNumber(value)]));
+    saveTransferPlanToStorage(numericPayload);
+    state.status = { type: 'success', message: 'Převody mezi účty byly uloženy.' };
+    render();
   });
 }
 
