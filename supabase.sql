@@ -167,6 +167,9 @@ create policy budget_periods_public_insert on budget_periods
 drop policy if exists budget_periods_public_update on budget_periods;
 create policy budget_periods_public_update on budget_periods
   for update using (true) with check (true);
+drop policy if exists budget_periods_public_delete on budget_periods;
+create policy budget_periods_public_delete on budget_periods
+  for delete using (true);
 
 drop policy if exists categories_public_select on categories;
 create policy categories_public_select on categories
